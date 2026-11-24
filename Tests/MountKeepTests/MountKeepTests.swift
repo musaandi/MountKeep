@@ -460,4 +460,126 @@ final class MountKeepTests: XCTestCase {
         XCTAssertNil(decoded.sshUsername)
         XCTAssertNil(decoded.sshKeyPath)
     }
+
+    func testHostSyncPolicyOnlineSyncTriggersAndNoOpSteadyState() {
+        // Offline / waking / checking / unknown servers MUST trigger wakefulness sync on drive mount.
+        XCTAssertTrue(HostSyncPolicy.needsOnlineSync(
+            hostState: .offline, sshEnabled: true, sshReadiness: .hostOffline, hasOfflineStrike: false, isAway: false
+        ))
+        XCTAssertTrue(HostSyncPolicy.needsOnlineSync(
+            hostState: .waking, sshEnabled: false, sshReadiness: nil, hasOfflineStrike: false, isAway: false
+        ))
+        XCTAssertTrue(HostSyncPolicy.needsOnlineSync(
+            hostState: .unknown, sshEnabled: false, sshReadiness: nil, hasOfflineStrike: false, isAway: false
+        ))
+
+        // Online with a pending offline strike MUST sync immediately to clear the strike.
+        XCTAssertTrue(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: false, sshReadiness: nil, hasOfflineStrike: true, isAway: false
+        ))
+
+        // Online with stale SSH readiness (.hostOffline / nil / .checking) MUST refresh SSH.
+        XCTAssertTrue(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: true, sshReadiness: .hostOffline, hasOfflineStrike: false, isAway: false
+        ))
+        XCTAssertTrue(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: true, sshReadiness: nil, hasOfflineStrike: false, isAway: false
+        ))
+
+        // Steady-state online & settled servers MUST be a no-op (zero extra probes / zero CPU).
+        XCTAssertFalse(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: false, sshReadiness: .disabled, hasOfflineStrike: false, isAway: false
+        ))
+        XCTAssertFalse(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: true, sshReadiness: .ready, hasOfflineStrike: false, isAway: false
+        ))
+        XCTAssertFalse(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: true, sshReadiness: .portClosed, hasOfflineStrike: false, isAway: false
+        ))
+        XCTAssertFalse(HostSyncPolicy.needsOnlineSync(
+            hostState: .online(ipAddress: "192.0.2.10"), sshEnabled: true, sshReadiness: .missingLocalKey, hasOfflineStrike: false, isAway: false
+        ))
+
+        // Away or shutting down servers MUST never sync online on mount notifications.
+        XCTAssertFalse(HostSyncPolicy.needsOnlineSync(
+            hostState: .offline, sshEnabled: true, sshReadiness: .hostOffline, hasOfflineStrike: false, isAway: true
+        ))
+        XCTAssertFalse(HostSyncPolicy.needsOnlineSync(
+            hostState: .shuttingDown, sshEnabled: true, sshReadiness: .ready, hasOfflineStrike: false, isAway: false
+        ))
+    }
+
+    func testHostSyncPolicyTwoStrikeOfflineGuardAndPollingAttention() {
+        let onlineState = HostReachabilityState.online(ipAddress: "192.0.2.20")
+
+        // If any mounted share passes a health check despite TCP :445 failing, stay online with cached IP.
+        let rescued = HostSyncPolicy.evaluateFailedHostProbe(
+            previousState: onlineState,
+            mountedShareCount: 3,
+            anyMountedShareHealthy: true,
+            currentStrikes: 1,
+            primaryIP: nil,
+            cachedIP: "192.0.2.20"
+        )
+        XCTAssertEqual(rescued, FailedHostProbeOutcome(nextHostState: onlineState, nextStrikes: 0, treatedAsReachable: true))
+
+        // Strike 1 on an online server with mounted shares holds .online instead of flickering offline.
+        let strike1 = HostSyncPolicy.evaluateFailedHostProbe(
+            previousState: onlineState,
+            mountedShareCount: 3,
+            anyMountedShareHealthy: false,
+            currentStrikes: 0,
+            primaryIP: nil,
+            cachedIP: "192.0.2.20"
+        )
+        XCTAssertEqual(strike1, FailedHostProbeOutcome(nextHostState: onlineState, nextStrikes: 1, treatedAsReachable: false))
+
+        // Strike 2 confirms the host is offline.
+        let strike2 = HostSyncPolicy.evaluateFailedHostProbe(
+            previousState: onlineState,
+            mountedShareCount: 3,
+            anyMountedShareHealthy: false,
+            currentStrikes: 1,
+            primaryIP: nil,
+            cachedIP: "192.0.2.20"
+        )
+        XCTAssertEqual(strike2, FailedHostProbeOutcome(nextHostState: .offline, nextStrikes: 0, treatedAsReachable: false))
+
+        // Zero mounted shares flips offline immediately on first failed probe.
+        let unmountedOffline = HostSyncPolicy.evaluateFailedHostProbe(
+            previousState: onlineState,
+            mountedShareCount: 0,
+            anyMountedShareHealthy: false,
+            currentStrikes: 0,
+            primaryIP: nil,
+            cachedIP: "192.0.2.20"
+        )
+        XCTAssertEqual(unmountedOffline, FailedHostProbeOutcome(nextHostState: .offline, nextStrikes: 0, treatedAsReachable: false))
+
+        // Shutting down flips straight to offline once TCP :445 drops.
+        let shutdownDone = HostSyncPolicy.evaluateFailedHostProbe(
+            previousState: .shuttingDown,
+            mountedShareCount: 0,
+            anyMountedShareHealthy: false,
+            currentStrikes: 0,
+            primaryIP: nil,
+            cachedIP: nil
+        )
+        XCTAssertEqual(shutdownDone, FailedHostProbeOutcome(nextHostState: .offline, nextStrikes: 0, treatedAsReachable: false))
+
+        // Polling attention: steady-state mounted + online drops to idle; pending strike or mismatch stays active.
+        let mountedShares: [ShareRuntimeState] = [.mounted(mountPoint: "/Volumes/Data")]
+        XCTAssertFalse(HostSyncPolicy.serverNeedsAttention(
+            enabledShareStates: mountedShares, hostState: onlineState, hasOfflineStrike: false
+        ))
+        XCTAssertTrue(HostSyncPolicy.serverNeedsAttention(
+            enabledShareStates: mountedShares, hostState: onlineState, hasOfflineStrike: true
+        ))
+        XCTAssertTrue(HostSyncPolicy.serverNeedsAttention(
+            enabledShareStates: mountedShares, hostState: .offline, hasOfflineStrike: false
+        ))
+        XCTAssertFalse(HostSyncPolicy.serverNeedsAttention(
+            enabledShareStates: [.manuallyUnmounted], hostState: .offline, hasOfflineStrike: false
+        ))
+    }
 }

@@ -235,7 +235,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
             version: AppConfig.currentVersion,
             pollIntervalSeconds: 30,
             idlePollIntervalSeconds: 120,
-            mountTimeoutSeconds: 15,
+            mountTimeoutSeconds: 30,
             paused: false,
             cleanupStaleMountsOnAway: true,
             healZombieMounts: true,
@@ -307,6 +307,109 @@ public enum BackoffPolicy {
         case 3: return 180
         default: return 300
         }
+    }
+}
+
+public struct FailedHostProbeOutcome: Equatable, Sendable {
+    public let nextHostState: HostReachabilityState
+    public let nextStrikes: Int
+    public let treatedAsReachable: Bool
+
+    public init(nextHostState: HostReachabilityState, nextStrikes: Int, treatedAsReachable: Bool) {
+        self.nextHostState = nextHostState
+        self.nextStrikes = nextStrikes
+        self.treatedAsReachable = treatedAsReachable
+    }
+}
+
+public enum HostSyncPolicy {
+    /// Returns true only when a drive mount indicates this server's host or SSH state is out of sync
+    /// and needs an immediate lightweight wakefulness check. Returns false when already online and
+    /// settled so normal steady-state activity triggers zero extra probes.
+    public static func needsOnlineSync(
+        hostState: HostReachabilityState,
+        sshEnabled: Bool,
+        sshReadiness: SSHReadinessState?,
+        hasOfflineStrike: Bool,
+        isAway: Bool
+    ) -> Bool {
+        guard !isAway, hostState != .shuttingDown else { return false }
+        if !hostState.isOnline || hasOfflineStrike {
+            return true
+        }
+        if sshEnabled {
+            switch sshReadiness {
+            case nil, .hostOffline, .checking, .disabled:
+                return true
+            case .ready, .portClosed, .missingLocalKey:
+                return false
+            }
+        }
+        return false
+    }
+
+    /// Evaluates a failed TCP :445 host probe while respecting active mounts and a 2-strike offline
+    /// threshold so a single transient network blip never flips a server with mounted shares to offline.
+    public static func evaluateFailedHostProbe(
+        previousState: HostReachabilityState,
+        mountedShareCount: Int,
+        anyMountedShareHealthy: Bool,
+        currentStrikes: Int,
+        primaryIP: String?,
+        cachedIP: String?
+    ) -> FailedHostProbeOutcome {
+        if previousState == .shuttingDown {
+            return FailedHostProbeOutcome(nextHostState: .offline, nextStrikes: 0, treatedAsReachable: false)
+        }
+        if anyMountedShareHealthy {
+            return FailedHostProbeOutcome(
+                nextHostState: .online(ipAddress: primaryIP ?? cachedIP),
+                nextStrikes: 0,
+                treatedAsReachable: true
+            )
+        }
+        if previousState == .waking {
+            return FailedHostProbeOutcome(nextHostState: .waking, nextStrikes: 0, treatedAsReachable: false)
+        }
+        if mountedShareCount > 0 && previousState.isOnline {
+            let strikes = currentStrikes + 1
+            if strikes < 2 {
+                return FailedHostProbeOutcome(
+                    nextHostState: previousState,
+                    nextStrikes: strikes,
+                    treatedAsReachable: false
+                )
+            }
+            return FailedHostProbeOutcome(nextHostState: .offline, nextStrikes: 0, treatedAsReachable: false)
+        }
+        return FailedHostProbeOutcome(nextHostState: .offline, nextStrikes: 0, treatedAsReachable: false)
+    }
+
+    /// Returns true if an active server needs active (fast) polling instead of idle polling.
+    public static func serverNeedsAttention(
+        enabledShareStates: [ShareRuntimeState],
+        hostState: HostReachabilityState,
+        hasOfflineStrike: Bool
+    ) -> Bool {
+        if hasOfflineStrike {
+            return true
+        }
+        let anyUnsettledShare = enabledShareStates.contains { state in
+            switch state {
+            case .mounted, .manuallyUnmounted:
+                return false
+            default:
+                return true
+            }
+        }
+        if anyUnsettledShare {
+            return true
+        }
+        let anyMounted = enabledShareStates.contains(where: \.isMounted)
+        if anyMounted && !hostState.isOnline && hostState != .shuttingDown {
+            return true
+        }
+        return false
     }
 }
 

@@ -53,6 +53,7 @@ public final class MountManager: ObservableObject {
     private let authNotifier: AuthNotifier
 
     private var hostIPCache: [UUID: Set<String>] = [:]
+    private var hostOfflineStrikes: [UUID: Int] = [:]
     private var failureCounts: [UUID: Int] = [:]
     private var retryDates: [UUID: Date] = [:]
     private var healthFailureCounts: [UUID: Int] = [:]
@@ -66,12 +67,14 @@ public final class MountManager: ObservableObject {
     private var lastCapacityRefreshDate: Date?
     private var isRefreshingCapacities = false
     private var lastUpdateCheckDate: Date?
+    private var lastHostSyncDate: [UUID: Date] = [:]
 
     private var pollTimer: Timer?
     private var debouncedCheckTask: Task<Void, Never>?
     private var awayCleanupTask: Task<Void, Never>?
     private var wakePollTasks: [UUID: Task<Void, Never>] = [:]
     private var shutdownPollTasks: [UUID: Task<Void, Never>] = [:]
+    private var hostSyncTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingRecheck = false
     private var pendingForceRetry = false
     private var networkObserver: NetworkPathObserver?
@@ -194,6 +197,8 @@ public final class MountManager: ObservableObject {
         wakePollTasks.removeAll()
         for (_, task) in shutdownPollTasks { task.cancel() }
         shutdownPollTasks.removeAll()
+        for (_, task) in hostSyncTasks { task.cancel() }
+        hostSyncTasks.removeAll()
         networkObserver?.stop()
         networkObserver = nil
         let center = NSWorkspace.shared.notificationCenter
@@ -219,6 +224,8 @@ public final class MountManager: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.healthFailureCounts.removeAll()
+                self?.hostOfflineStrikes.removeAll()
+                self?.lastHostSyncDate.removeAll()
             }
         }
 
@@ -231,6 +238,8 @@ public final class MountManager: ObservableObject {
                 guard let self else { return }
                 self.logger.info("System woke from sleep — scheduling network & mount check")
                 self.healthFailureCounts.removeAll()
+                self.hostOfflineStrikes.removeAll()
+                self.lastHostSyncDate.removeAll()
                 self.clearBackoffs()
                 self.scheduleDebouncedCheck(delay: 6.0, forceRetry: true)
             }
@@ -240,10 +249,10 @@ public final class MountManager: ObservableObject {
             forName: NSWorkspace.didMountNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            let mountedURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL
             Task { @MainActor in
-                self?.refreshMountedSnapshotOnly()
-                self?.recomputePollTimer()
+                self?.handleDidMountNotification(volumeURL: mountedURL)
             }
         }
 
@@ -299,14 +308,12 @@ public final class MountManager: ObservableObject {
                 desired = .dormant
             } else {
                 let anyNeedsAttention = activeServers.contains { server in
-                    server.shares.filter(\.enabled).contains { share in
-                        switch shareStates[share.id] ?? .unknown {
-                        case .mounted, .manuallyUnmounted:
-                            return false
-                        default:
-                            return true
-                        }
-                    }
+                    let states = server.shares.filter(\.enabled).map { shareStates[$0.id] ?? .unknown }
+                    return HostSyncPolicy.serverNeedsAttention(
+                        enabledShareStates: states,
+                        hostState: hostStates[server.id] ?? .unknown,
+                        hasOfflineStrike: (hostOfflineStrikes[server.id] ?? 0) > 0
+                    )
                 }
                 desired = anyNeedsAttention
                     ? .active(seconds: config.pollIntervalSeconds)
@@ -351,9 +358,176 @@ public final class MountManager: ObservableObject {
 
     // MARK: - Core Reconciliation
 
-    public func refreshMountedSnapshotOnly() {
+    @discardableResult
+    public func refreshMountedSnapshotOnly() -> Set<UUID> {
         let mounted = MountInspector.mountedSMBShares()
-        applyMountedSnapshot(mounted)
+        return applyMountedSnapshot(mounted)
+    }
+
+    private func handleDidMountNotification(volumeURL: URL?) {
+        let mounted = MountInspector.mountedSMBShares()
+        var targetServerIDs = applyMountedSnapshot(mounted)
+
+        // If no tracked share transitioned to mounted, check whether this event was an SMB mount
+        // (ignoring local USB drives, DMGs, and APFS snapshots so they trigger zero network probes).
+        if targetServerIDs.isEmpty,
+           let volumePath = volumeURL?.standardizedFileURL.path,
+           let smbShare = mounted.first(where: { $0.mountPoint == volumePath }) {
+            let normMountHost = MountInspector.normalizeHost(smbShare.host)
+            var matchedAny = false
+            for server in config.servers {
+                let ips = hostIPCache[server.id] ?? []
+                if MountInspector.normalizeHost(server.host) == normMountHost || ips.contains(smbShare.host) {
+                    targetServerIDs.insert(server.id)
+                    matchedAny = true
+                }
+            }
+            if !matchedAny {
+                for server in config.servers where !isServerAway(server) {
+                    let hasNoCachedIPs = hostIPCache[server.id]?.isEmpty ?? true
+                    if hasNoCachedIPs && hostStates[server.id]?.isOnline != true {
+                        targetServerIDs.insert(server.id)
+                    }
+                }
+            }
+        }
+
+        for serverID in targetServerIDs {
+            syncHostOnlineStateIfNeeded(forServerID: serverID, triggerFollowUpCheckIfUnmounted: true)
+        }
+        recomputePollTimer()
+    }
+
+    private func cachedPrimaryIP(forServerID serverID: UUID) -> String? {
+        if case .online(let existingIP) = hostStates[serverID], let existingIP {
+            return existingIP
+        }
+        return hostIPCache[serverID]?.sorted().first
+    }
+
+    /// Runs a single coalesced, lightweight wakefulness check (TCP :445 and/or SSH :22) for a server
+    /// right after a drive mounts, ONLY if its host or SSH state is currently out of sync.
+    private func syncHostOnlineStateIfNeeded(
+        forServerID serverID: UUID,
+        triggerFollowUpCheckIfUnmounted: Bool = false
+    ) {
+        guard let server = config.servers.first(where: { $0.id == serverID }) else { return }
+        let currentHostState = hostStates[serverID] ?? .unknown
+        let currentSSH = sshReadiness[serverID]
+        let hasStrike = (hostOfflineStrikes[serverID] ?? 0) > 0
+
+        guard HostSyncPolicy.needsOnlineSync(
+            hostState: currentHostState,
+            sshEnabled: server.canRemoteShutdown,
+            sshReadiness: currentSSH,
+            hasOfflineStrike: hasStrike,
+            isAway: isServerAway(server)
+        ) else {
+            return
+        }
+
+        // Coalesce burst mount events (e.g. multiple shares mounting in quick succession).
+        guard hostSyncTasks[serverID] == nil else { return }
+        if let last = lastHostSyncDate[serverID], Date().timeIntervalSince(last) < 3.0 {
+            return
+        }
+
+        hostSyncTasks[serverID] = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.hostSyncTasks[serverID] = nil
+                self.lastHostSyncDate[serverID] = Date()
+            }
+
+            guard let latestServer = self.config.servers.first(where: { $0.id == serverID }),
+                  !self.isServerAway(latestServer),
+                  self.hostStates[serverID] != .shuttingDown else {
+                return
+            }
+
+            let stateAtStart = self.hostStates[serverID] ?? .unknown
+            let needsHostProbe = !stateAtStart.isOnline || ((self.hostOfflineStrikes[serverID] ?? 0) > 0)
+
+            // If host is already online with no offline strikes and only SSH readiness is stale,
+            // skip the redundant TCP :445 handshake and check SSH :22 directly.
+            if !needsHostProbe {
+                if latestServer.canRemoteShutdown {
+                    await self.refreshSSHReadiness(forServerID: serverID)
+                }
+                self.recomputePollTimer()
+                return
+            }
+
+            let wasOffline = !stateAtStart.isOnline
+            let probe = await NetworkReachability.probeSMBHost(latestServer.host, port: 445, timeout: 1.5)
+            guard !Task.isCancelled else { return }
+
+            let previousIPs = self.hostIPCache[serverID] ?? []
+            if !probe.allIPs.isEmpty {
+                self.hostIPCache[serverID] = probe.allIPs
+            }
+
+            var isOnlineNow = probe.isReachable
+            if !isOnlineNow {
+                let mountedPoints = latestServer.shares.compactMap { self.shareStates[$0.id]?.mountPoint }
+                if !mountedPoints.isEmpty {
+                    let healthResults = await self.probeMountedSharesHealth(mountPoints: mountedPoints, timeout: 2.0)
+                    isOnlineNow = healthResults.values.contains(.healthy)
+                }
+            }
+
+            guard !Task.isCancelled, self.hostStates[serverID] != .shuttingDown else { return }
+
+            if isOnlineNow {
+                let ip = probe.primaryIP ?? self.cachedPrimaryIP(forServerID: serverID)
+                self.hostOfflineStrikes[serverID] = nil
+                self.hostStates[serverID] = .online(ipAddress: ip)
+                self.wakePollTasks[serverID]?.cancel()
+                self.wakePollTasks[serverID] = nil
+
+                if !probe.allIPs.isEmpty && probe.allIPs != previousIPs {
+                    self.refreshMountedSnapshotOnly()
+                }
+                if self.learnMACIfMissing(serverID: serverID, ip: ip) {
+                    self.saveConfig()
+                }
+                if latestServer.canRemoteShutdown {
+                    await self.refreshSSHReadiness(forServerID: serverID)
+                }
+                self.logger.info("Synced \(latestServer.host) to online after drive mount\(ip.map { " (\($0))" } ?? "")")
+                self.recomputePollTimer()
+
+                if triggerFollowUpCheckIfUnmounted && wasOffline && !self.config.paused {
+                    let hasWaitingShares = latestServer.shares.contains { share in
+                        guard share.enabled, !self.manuallyUnmountedShareIDs.contains(share.id) else { return false }
+                        return self.shareStates[share.id]?.isMounted != true
+                    }
+                    if hasWaitingShares {
+                        self.scheduleDebouncedCheck(delay: 1.5, forceRetry: false)
+                    }
+                }
+            }
+        }
+    }
+
+    private func probeMountedSharesHealth(
+        mountPoints: [String],
+        timeout: TimeInterval
+    ) async -> [String: MountHealth] {
+        guard !mountPoints.isEmpty else { return [:] }
+        return await withTaskGroup(of: (String, MountHealth).self) { group in
+            for mp in mountPoints {
+                group.addTask {
+                    let health = await NetFSMounter.checkMountHealth(mountPoint: mp, timeout: timeout)
+                    return (mp, health)
+                }
+            }
+            var results: [String: MountHealth] = [:]
+            for await (mp, health) in group {
+                results[mp] = health
+            }
+            return results
+        }
     }
 
     /// Asynchronously refreshes live disk usage (`statfs`) for mounted shares on non-away servers.
@@ -401,7 +575,9 @@ public final class MountManager: ObservableObject {
         }
     }
 
-    private func applyMountedSnapshot(_ mounted: [MountedSMBShare]) {
+    @discardableResult
+    private func applyMountedSnapshot(_ mounted: [MountedSMBShare]) -> Set<UUID> {
+        var newlyMountedServerIDs: Set<UUID> = []
         for server in config.servers {
             let ips = hostIPCache[server.id] ?? []
             for share in server.shares {
@@ -414,7 +590,11 @@ public final class MountManager: ObservableObject {
                     )
                 }) {
                     if case .healing = shareStates[share.id] { continue }
+                    let wasMounted = shareStates[share.id]?.isMounted == true
                     shareStates[share.id] = .mounted(mountPoint: match.mountPoint)
+                    if !wasMounted {
+                        newlyMountedServerIDs.insert(server.id)
+                    }
                     if let cap = match.capacity {
                         shareCapacities[share.id] = cap
                     }
@@ -443,6 +623,7 @@ public final class MountManager: ObservableObject {
                 }
             }
         }
+        return newlyMountedServerIDs
     }
 
     public func checkAll(forceRetry: Bool = false) async {
@@ -567,14 +748,19 @@ public final class MountManager: ObservableObject {
         }
 
         var reachableByServer: [UUID: Bool] = [:]
+        var precomputedHealthByMountPoint: [String: MountHealth] = [:]
         var learnedAnyMAC = false
         for (serverID, result) in probeResults {
-            hostIPCache[serverID] = result.allIPs
+            if !result.allIPs.isEmpty {
+                hostIPCache[serverID] = result.allIPs
+            }
             reachableByServer[serverID] = result.isReachable
 
             if result.isReachable {
+                hostOfflineStrikes[serverID] = nil
                 if hostStates[serverID] != .shuttingDown {
-                    hostStates[serverID] = .online(ipAddress: result.primaryIP)
+                    let ip = result.primaryIP ?? cachedPrimaryIP(forServerID: serverID)
+                    hostStates[serverID] = .online(ipAddress: ip)
                     wakePollTasks[serverID]?.cancel()
                     wakePollTasks[serverID] = nil
                 }
@@ -584,25 +770,38 @@ public final class MountManager: ObservableObject {
                     learnedAnyMAC = true
                 }
             } else {
-                // If TCP :445 probe failed (e.g. Local Network privacy or transient probe drop) but a mounted
-                // share on this server passes a live health probe, the host is demonstrably online.
-                var verifiedOnlineViaMount = false
-                if hostStates[serverID] != .shuttingDown,
-                   let srv = config.servers.first(where: { $0.id == serverID }),
-                   let mountedPoint = srv.shares.compactMap({ shareStates[$0.id]?.mountPoint }).first {
-                    let health = await NetFSMounter.checkMountHealth(mountPoint: mountedPoint, timeout: 2.0)
-                    if health == .healthy {
-                        verifiedOnlineViaMount = true
+                let previousState = hostStates[serverID] ?? .unknown
+                let srv = config.servers.first(where: { $0.id == serverID })
+                let mountedPoints = srv?.shares.compactMap { shareStates[$0.id]?.mountPoint } ?? []
+
+                var anyMountedShareHealthy = false
+                if previousState != .shuttingDown && previousState != .waking && !mountedPoints.isEmpty {
+                    let healthByMount = await probeMountedSharesHealth(mountPoints: mountedPoints, timeout: 2.5)
+                    for (mp, health) in healthByMount {
+                        precomputedHealthByMountPoint[mp] = health
                     }
+                    anyMountedShareHealthy = healthByMount.values.contains(.healthy)
                 }
 
-                if verifiedOnlineViaMount {
-                    reachableByServer[serverID] = true
-                    hostStates[serverID] = .online(ipAddress: result.primaryIP)
+                let outcome = HostSyncPolicy.evaluateFailedHostProbe(
+                    previousState: previousState,
+                    mountedShareCount: mountedPoints.count,
+                    anyMountedShareHealthy: anyMountedShareHealthy,
+                    currentStrikes: hostOfflineStrikes[serverID] ?? 0,
+                    primaryIP: result.primaryIP,
+                    cachedIP: cachedPrimaryIP(forServerID: serverID)
+                )
+
+                reachableByServer[serverID] = outcome.treatedAsReachable
+                hostStates[serverID] = outcome.nextHostState
+                hostOfflineStrikes[serverID] = outcome.nextStrikes > 0 ? outcome.nextStrikes : nil
+
+                if outcome.treatedAsReachable {
                     wakePollTasks[serverID]?.cancel()
                     wakePollTasks[serverID] = nil
-                } else if hostStates[serverID] != .waking {
-                    hostStates[serverID] = .offline
+                } else if outcome.nextStrikes > 0, let host = srv?.host {
+                    logger.warn("Host probe failed for \(host) while \(mountedPoints.count) share(s) mounted (strike \(outcome.nextStrikes)/2) — holding online state for re-verification")
+                } else if outcome.nextHostState == .offline {
                     shutdownPollTasks[serverID]?.cancel()
                     shutdownPollTasks[serverID] = nil
                 }
@@ -636,7 +835,11 @@ public final class MountManager: ObservableObject {
 
         // 4. Zombie / Hung Mount Self-Healing for mounted shares on eligible servers.
         if config.healZombieMounts {
-            await healStaleMountsIfNeeded(for: eligibleServers, reachableByServer: reachableByServer)
+            await healStaleMountsIfNeeded(
+                for: eligibleServers,
+                reachableByServer: reachableByServer,
+                precomputedHealthByMountPoint: precomputedHealthByMountPoint
+            )
         }
 
         // 5. Mount per-server sequentially, with different servers running concurrently.
@@ -715,35 +918,48 @@ public final class MountManager: ObservableObject {
 
     private func healStaleMountsIfNeeded(
         for servers: [ServerConfig],
-        reachableByServer: [UUID: Bool]
+        reachableByServer: [UUID: Bool],
+        precomputedHealthByMountPoint: [String: MountHealth] = [:]
     ) async {
         var toProbe: [(server: ServerConfig, share: ShareConfig, mountPoint: String)] = []
+        var alreadyMeasured: [(ServerConfig, ShareConfig, String, MountHealth)] = []
         for server in servers {
             for share in server.shares where share.enabled {
                 if case .mounted(let mp) = shareStates[share.id], !inFlightHealthChecks.contains(share.id) {
-                    toProbe.append((server, share, mp))
+                    if let cached = precomputedHealthByMountPoint[mp] {
+                        alreadyMeasured.append((server, share, mp, cached))
+                    } else {
+                        toProbe.append((server, share, mp))
+                    }
                 }
             }
         }
-        guard !toProbe.isEmpty else { return }
+        guard !toProbe.isEmpty || !alreadyMeasured.isEmpty else { return }
 
         for item in toProbe {
             inFlightHealthChecks.insert(item.share.id)
         }
 
-        let results: [(ServerConfig, ShareConfig, String, MountHealth)] = await withTaskGroup(
-            of: (ServerConfig, ShareConfig, String, MountHealth).self
-        ) { group in
-            for item in toProbe {
-                group.addTask {
-                    let health = await NetFSMounter.checkMountHealth(mountPoint: item.mountPoint, timeout: 3.0)
-                    return (item.server, item.share, item.mountPoint, health)
+        let probedResults: [(ServerConfig, ShareConfig, String, MountHealth)]
+        if toProbe.isEmpty {
+            probedResults = []
+        } else {
+            probedResults = await withTaskGroup(
+                of: (ServerConfig, ShareConfig, String, MountHealth).self
+            ) { group in
+                for item in toProbe {
+                    group.addTask {
+                        let health = await NetFSMounter.checkMountHealth(mountPoint: item.mountPoint, timeout: 3.0)
+                        return (item.server, item.share, item.mountPoint, health)
+                    }
                 }
+                var out: [(ServerConfig, ShareConfig, String, MountHealth)] = []
+                for await res in group { out.append(res) }
+                return out
             }
-            var out: [(ServerConfig, ShareConfig, String, MountHealth)] = []
-            for await res in group { out.append(res) }
-            return out
         }
+
+        let results = alreadyMeasured + probedResults
 
         var healedAny = false
         for (server, share, mountPoint, health) in results {
@@ -901,6 +1117,7 @@ public final class MountManager: ObservableObject {
         switch outcome {
         case .mounted(let mountPoint):
             consecutiveNetFSTimeouts = 0
+            hostOfflineStrikes[server.id] = nil
             failureCounts[share.id] = nil
             retryDates[share.id] = nil
             healthFailureCounts[share.id] = nil
@@ -908,6 +1125,7 @@ public final class MountManager: ObservableObject {
             shareStates[share.id] = .mounted(mountPoint: mountPoint)
             authNotifier.clearThrottle(forServerID: server.id)
             logger.info("Mounted \(server.host)/\(share.name) at \(mountPoint)")
+            syncHostOnlineStateIfNeeded(forServerID: server.id)
             return .mounted
 
         case .failed(let code, let message, let isAuthError):
@@ -922,10 +1140,12 @@ public final class MountManager: ObservableObject {
                 )
             }) {
                 consecutiveNetFSTimeouts = 0
+                hostOfflineStrikes[server.id] = nil
                 failureCounts[share.id] = nil
                 retryDates[share.id] = nil
                 shareStates[share.id] = .mounted(mountPoint: existing.mountPoint)
                 authNotifier.clearThrottle(forServerID: server.id)
+                syncHostOnlineStateIfNeeded(forServerID: server.id)
                 return .mounted
             }
 
@@ -1056,9 +1276,19 @@ public final class MountManager: ObservableObject {
             defer { inFlightMountServerIDs.remove(serverID) }
 
             let probe = await NetworkReachability.probeSMBHost(server.host, port: 445, timeout: 1.5)
-            hostIPCache[server.id] = probe.allIPs
-            hostStates[server.id] = probe.isReachable ? .online(ipAddress: probe.primaryIP) : .offline
-            guard probe.isReachable else {
+            if !probe.allIPs.isEmpty {
+                hostIPCache[server.id] = probe.allIPs
+            }
+            if probe.isReachable {
+                hostOfflineStrikes[server.id] = nil
+                wakePollTasks[server.id]?.cancel()
+                wakePollTasks[server.id] = nil
+                hostStates[server.id] = .online(ipAddress: probe.primaryIP ?? cachedPrimaryIP(forServerID: server.id))
+                syncHostOnlineStateIfNeeded(forServerID: server.id)
+            } else {
+                if !anyMounted {
+                    hostStates[server.id] = .offline
+                }
                 shareStates[share.id] = .hostOffline
                 return
             }
@@ -1096,9 +1326,20 @@ public final class MountManager: ObservableObject {
         let timeout = TimeInterval(config.mountTimeoutSeconds)
         Task {
             let probe = await NetworkReachability.probeSMBHost(server.host, port: 445, timeout: 1.5)
-            hostIPCache[server.id] = probe.allIPs
-            hostStates[server.id] = probe.isReachable ? .online(ipAddress: probe.primaryIP) : .offline
-            guard probe.isReachable else {
+            if !probe.allIPs.isEmpty {
+                hostIPCache[server.id] = probe.allIPs
+            }
+            let anyMounted = server.shares.contains { shareStates[$0.id]?.isMounted == true }
+            if probe.isReachable {
+                hostOfflineStrikes[server.id] = nil
+                wakePollTasks[server.id]?.cancel()
+                wakePollTasks[server.id] = nil
+                hostStates[server.id] = .online(ipAddress: probe.primaryIP ?? cachedPrimaryIP(forServerID: server.id))
+                syncHostOnlineStateIfNeeded(forServerID: server.id)
+            } else {
+                if !anyMounted {
+                    hostStates[server.id] = .offline
+                }
                 for share in server.shares where share.enabled && shareStates[share.id]?.isMounted != true {
                     shareStates[share.id] = .hostOffline
                 }
@@ -1153,6 +1394,7 @@ public final class MountManager: ObservableObject {
 
         shutdownPollTasks[serverID]?.cancel()
         shutdownPollTasks[serverID] = nil
+        hostOfflineStrikes[serverID] = nil
         hostStates[serverID] = .waking
         for share in server.shares {
             failureCounts[share.id] = nil
@@ -1200,6 +1442,9 @@ public final class MountManager: ObservableObject {
 
         wakePollTasks[serverID]?.cancel()
         wakePollTasks[serverID] = nil
+        hostSyncTasks[serverID]?.cancel()
+        hostSyncTasks[serverID] = nil
+        hostOfflineStrikes[serverID] = nil
         shutdownPollTasks[serverID]?.cancel()
 
         hostStates[serverID] = .shuttingDown
@@ -1741,9 +1986,16 @@ public final class MountManager: ObservableObject {
     public func removeServer(serverID: UUID) {
         wakePollTasks[serverID]?.cancel()
         wakePollTasks[serverID] = nil
+        shutdownPollTasks[serverID]?.cancel()
+        shutdownPollTasks[serverID] = nil
+        hostSyncTasks[serverID]?.cancel()
+        hostSyncTasks[serverID] = nil
         config.servers.removeAll { $0.id == serverID }
         hostStates[serverID] = nil
         hostIPCache[serverID] = nil
+        hostOfflineStrikes[serverID] = nil
+        lastHostSyncDate[serverID] = nil
+        sshReadiness[serverID] = nil
         saveConfig()
         recomputePollTimer()
     }

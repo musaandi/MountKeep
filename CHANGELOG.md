@@ -2,6 +2,12 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.6.1] - 2026-11-23
+
+### Fixed
+- **Instant Event-Driven Host Sync on Drive Mount:** Mounting a share (via MountKeep or externally in Finder) immediately runs a single coalesced wakefulness check (`TCP :445` and SSH `:22` when Remote Shut Down is enabled) *only* if that server's host or SSH state is out of sync — flipping `offline` / `Wake` straight to `online` / `Off` in milliseconds with zero steady-state polling overhead (and ignoring local USB/DMG mounts).
+- **2-Strike Offline Guard & Parallel Mount Health Verification:** When a host's `TCP :445` probe fails while shares are mounted, MountKeep now verifies all mounted shares on that server in parallel (reusing results in the zombie-healing pass to avoid double-probing), preserves cached IPs across transient DNS blips, holds the server `.online` across a single transient hiccup (re-verifying on the 30s active cadence), and hides the `Wake` pill whenever shares on that server are mounted.
+
 ## [1.6.0] - 2026-11-23
 
 ### Added

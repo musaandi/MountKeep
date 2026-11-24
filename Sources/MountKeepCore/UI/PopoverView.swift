@@ -382,7 +382,7 @@ public struct PopoverView: View {
                     } else if case .shuttingDown = hostState {
                         ProgressView()
                             .controlSize(.mini)
-                    } else if case .offline = hostState, let mac = server.macAddress {
+                    } else if case .offline = hostState, mountedCount == 0, let mac = server.macAddress {
                         Button {
                             manager.wakeServer(serverID: server.id)
                         } label: {
