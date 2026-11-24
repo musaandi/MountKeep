@@ -198,26 +198,78 @@ public final class AuthNotifier {
     }
 }
 
-// MARK: - Finder .DS_Store Network Preference
+// MARK: - Finder Preferences
 
 public enum FinderPreferences {
-    private static let domain = "com.apple.desktopservices" as CFString
-    private static let key = "DSDontWriteNetworkStores" as CFString
+    private static let desktopServicesDomain = "com.apple.desktopservices" as CFString
+    private static let dsStoreKey = "DSDontWriteNetworkStores" as CFString
+
+    private static let finderDomain = "com.apple.finder" as CFString
+    private static let showAllFilesKey = "AppleShowAllFiles" as CFString
+
+    private static let showAllExtensionsKey = "AppleShowAllExtensions" as CFString
 
     public static var dontWriteNetworkDSStore: Bool {
-        get {
-            CFPreferencesAppSynchronize(domain)
-            if let value = CFPreferencesCopyAppValue(key, domain) as? Bool {
-                return value
-            }
-            if let num = CFPreferencesCopyAppValue(key, domain) as? NSNumber {
-                return num.boolValue
-            }
-            return false
-        }
+        get { readBool(key: dsStoreKey, domain: desktopServicesDomain) }
+        set { writeBool(newValue, key: dsStoreKey, domain: desktopServicesDomain) }
+    }
+
+    public static var showHiddenFiles: Bool {
+        get { readBool(key: showAllFilesKey, domain: finderDomain) }
         set {
-            CFPreferencesSetAppValue(key, newValue ? kCFBooleanTrue : kCFBooleanFalse, domain)
-            CFPreferencesAppSynchronize(domain)
+            writeBool(newValue, key: showAllFilesKey, domain: finderDomain)
+            restartFinder()
+        }
+    }
+
+    public static var showFileExtensions: Bool {
+        get { readBool(key: showAllExtensionsKey, domain: kCFPreferencesAnyApplication) }
+        set {
+            CFPreferencesSetValue(
+                showAllExtensionsKey,
+                newValue ? kCFBooleanTrue : kCFBooleanFalse,
+                kCFPreferencesAnyApplication,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+            CFPreferencesSynchronize(
+                kCFPreferencesAnyApplication,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+            restartFinder()
+        }
+    }
+
+    private static func readBool(key: CFString, domain: CFString) -> Bool {
+        CFPreferencesAppSynchronize(domain)
+        let raw = CFPreferencesCopyAppValue(key, domain)
+        if let value = raw as? Bool {
+            return value
+        }
+        if let num = raw as? NSNumber {
+            return num.boolValue
+        }
+        if let str = raw as? String {
+            return ["true", "yes", "1"].contains(str.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+        return false
+    }
+
+    private static func writeBool(_ value: Bool, key: CFString, domain: CFString) {
+        CFPreferencesSetAppValue(key, value ? kCFBooleanTrue : kCFBooleanFalse, domain)
+        CFPreferencesAppSynchronize(domain)
+    }
+
+    private static func restartFinder() {
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            process.arguments = ["Finder"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
         }
     }
 }

@@ -651,6 +651,29 @@ public struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .padding(.leading, 18)
 
+            Toggle(
+                "Show hidden files and folders in Finder",
+                isOn: Binding(
+                    get: { manager.showHiddenFiles },
+                    set: { manager.setShowHiddenFiles($0) }
+                )
+            )
+            .font(.system(size: 12.5))
+
+            Toggle(
+                "Show all filename extensions in Finder",
+                isOn: Binding(
+                    get: { manager.showFileExtensions },
+                    set: { manager.setShowFileExtensions($0) }
+                )
+            )
+            .font(.system(size: 12.5))
+
+            Text("Toggling hidden files or extensions restarts Finder so open windows refresh immediately.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 18)
+
             Divider()
 
             HStack(spacing: 10) {
@@ -672,6 +695,37 @@ public struct SettingsView: View {
                 }
                 .labelsHidden()
                 .frame(width: 230)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Updates (v\(UpdateChecker.currentAppVersion()))")
+                        .font(.system(size: 12.5))
+                    if let status = manager.updateCheckStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(manager.availableUpdate != nil ? .blue : .secondary)
+                    } else {
+                        Text("Checks GitHub Releases (musaandi/MountKeep) for new versions.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if let update = manager.availableUpdate {
+                    Button("Open v\(update.version)") {
+                        manager.openAvailableUpdate()
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                }
+                Button(manager.isCheckingForUpdates ? "Checking…" : "Check Now") {
+                    Task { await manager.checkForUpdates(manual: true) }
+                }
+                .controlSize(.small)
+                .disabled(manager.isCheckingForUpdates)
             }
         }
         .padding(12)

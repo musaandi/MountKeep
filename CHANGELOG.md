@@ -2,6 +2,12 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.3.0] - 2026-11-23
+
+### Added
+- **Finder Quick Toggles:** Added **Hidden Files** (`AppleShowAllFiles`) and **Extensions** (`AppleShowAllExtensions`) toggle pills directly in the menu bar popover and Settings → Network & System.
+- **GitHub Update Checker:** Added `UpdateChecker` using the GitHub Releases API (`musaandi/MountKeep`) with automatic 24-hour checks, a manual **Check Now** button in Settings, and an **Update vX.Y.Z** pill in the menu bar popover when a newer release is published.
+
 ## [1.2.1] - 2026-11-23
 
 ### Added

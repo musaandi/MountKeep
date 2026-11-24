@@ -356,4 +356,37 @@ final class MountKeepTests: XCTestCase {
         XCTAssertNil(VolumeCapacity.combine([invalid]))
         XCTAssertNil(VolumeCapacity.combine([]))
     }
+
+    func testUpdateCheckerVersionComparisonAndParsing() {
+        XCTAssertTrue(UpdateChecker.isNewer(releaseVersion: "1.3.0", than: "1.2.1"))
+        XCTAssertTrue(UpdateChecker.isNewer(releaseVersion: "v1.2.2", than: "1.2.1"))
+        XCTAssertTrue(UpdateChecker.isNewer(releaseVersion: "2.0.0", than: "1.9.9"))
+        XCTAssertFalse(UpdateChecker.isNewer(releaseVersion: "1.2.1", than: "1.2.1"))
+        XCTAssertFalse(UpdateChecker.isNewer(releaseVersion: "1.2.0", than: "1.2.1"))
+
+        let json = """
+        {
+          "tag_name": "v1.3.0",
+          "html_url": "https://github.com/musaandi/MountKeep/releases/tag/v1.3.0",
+          "published_at": "2026-11-23T20:00:00Z",
+          "draft": false,
+          "prerelease": false
+        }
+        """.data(using: .utf8)!
+
+        let parsed = UpdateChecker.parseLatestRelease(from: json)
+        XCTAssertEqual(parsed?.version, "1.3.0")
+        XCTAssertEqual(parsed?.tagName, "v1.3.0")
+        XCTAssertEqual(parsed?.releaseURL.absoluteString, "https://github.com/musaandi/MountKeep/releases/tag/v1.3.0")
+
+        let draftJSON = """
+        {
+          "tag_name": "v1.4.0",
+          "html_url": "https://github.com/musaandi/MountKeep/releases/tag/v1.4.0",
+          "draft": true,
+          "prerelease": false
+        }
+        """.data(using: .utf8)!
+        XCTAssertNil(UpdateChecker.parseLatestRelease(from: draftJSON))
+    }
 }

@@ -40,6 +40,11 @@ public final class MountManager: ObservableObject {
     @Published public private(set) var isOnHomeNetwork: Bool = true
     @Published public private(set) var activePollCadence: PollCadence = .active(seconds: 30)
     @Published public private(set) var dontWriteNetworkDSStore: Bool
+    @Published public private(set) var showHiddenFiles: Bool
+    @Published public private(set) var showFileExtensions: Bool
+    @Published public private(set) var availableUpdate: AppReleaseInfo?
+    @Published public private(set) var isCheckingForUpdates: Bool = false
+    @Published public private(set) var updateCheckStatus: String?
 
     public let configStore: ConfigStore
     private let logger: MountLogger
@@ -54,6 +59,7 @@ public final class MountManager: ObservableObject {
     private var lastAutoDiscovery: [UUID: Date] = [:]
     private var lastCapacityRefreshDate: Date?
     private var isRefreshingCapacities = false
+    private var lastUpdateCheckDate: Date?
 
     private var pollTimer: Timer?
     private var debouncedCheckTask: Task<Void, Never>?
@@ -71,6 +77,8 @@ public final class MountManager: ObservableObject {
         self.config = configStore.load()
         self.launchAtLogin = LaunchAgentManager.isEnabled()
         self.dontWriteNetworkDSStore = FinderPreferences.dontWriteNetworkDSStore
+        self.showHiddenFiles = FinderPreferences.showHiddenFiles
+        self.showFileExtensions = FinderPreferences.showFileExtensions
     }
 
     // MARK: - Computed Status
@@ -165,6 +173,7 @@ public final class MountManager: ObservableObject {
 
         Task {
             await checkAll(forceRetry: true)
+            await checkForUpdates(manual: false)
         }
     }
 
@@ -852,6 +861,7 @@ public final class MountManager: ObservableObject {
         clearBackoffs()
         Task {
             await checkAll(forceRetry: true)
+            await checkForUpdates(manual: false)
         }
     }
 
@@ -864,6 +874,7 @@ public final class MountManager: ObservableObject {
         }
         Task {
             await checkAll(forceRetry: true)
+            await checkForUpdates(manual: false)
         }
     }
 
@@ -1163,6 +1174,68 @@ public final class MountManager: ObservableObject {
         FinderPreferences.dontWriteNetworkDSStore = enabled
         dontWriteNetworkDSStore = FinderPreferences.dontWriteNetworkDSStore
         logger.info("DSDontWriteNetworkStores set to \(dontWriteNetworkDSStore)")
+    }
+
+    public func setShowHiddenFiles(_ enabled: Bool) {
+        FinderPreferences.showHiddenFiles = enabled
+        showHiddenFiles = FinderPreferences.showHiddenFiles
+        logger.info("AppleShowAllFiles set to \(showHiddenFiles)")
+    }
+
+    public func setShowFileExtensions(_ enabled: Bool) {
+        FinderPreferences.showFileExtensions = enabled
+        showFileExtensions = FinderPreferences.showFileExtensions
+        logger.info("AppleShowAllExtensions set to \(showFileExtensions)")
+    }
+
+    public func refreshFinderPreferences() {
+        dontWriteNetworkDSStore = FinderPreferences.dontWriteNetworkDSStore
+        showHiddenFiles = FinderPreferences.showHiddenFiles
+        showFileExtensions = FinderPreferences.showFileExtensions
+    }
+
+    // MARK: - App Updates
+
+    public func checkForUpdates(manual: Bool = true) async {
+        if isCheckingForUpdates { return }
+        if !manual, let last = lastUpdateCheckDate, Date().timeIntervalSince(last) < 86_400 {
+            return
+        }
+
+        isCheckingForUpdates = true
+        if manual {
+            updateCheckStatus = "Checking for updates…"
+        }
+        defer { isCheckingForUpdates = false }
+
+        let outcome = await UpdateChecker.checkLatestRelease()
+        lastUpdateCheckDate = Date()
+
+        switch outcome {
+        case .updateAvailable(let release):
+            availableUpdate = release
+            updateCheckStatus = "Update available: v\(release.version)"
+            logger.info("Update available on GitHub: v\(release.version) (\(release.releaseURL.absoluteString))")
+        case .upToDate(let current):
+            availableUpdate = nil
+            if manual {
+                updateCheckStatus = "Up to date (v\(current))"
+            }
+        case .noReleasesPublished:
+            availableUpdate = nil
+            if manual {
+                updateCheckStatus = "No published GitHub releases yet."
+            }
+        case .failed(let message):
+            if manual {
+                updateCheckStatus = "Update check failed: \(message)"
+            }
+        }
+    }
+
+    public func openAvailableUpdate() {
+        guard let url = availableUpdate?.releaseURL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     public func setStorageUnitStyle(_ style: StorageUnitStyle) {

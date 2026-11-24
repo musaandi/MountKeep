@@ -145,9 +145,15 @@ public struct PopoverView: View {
             }
 
             Divider()
+            finderQuickTogglesView
+            Divider()
             footerView
         }
         .frame(width: 386)
+        .onAppear {
+            manager.refreshFinderPreferences()
+            Task { await manager.checkForUpdates(manual: false) }
+        }
     }
 
     private func overallStorageSummary(_ overall: VolumeCapacity) -> some View {
@@ -216,6 +222,25 @@ public struct PopoverView: View {
             }
 
             Spacer()
+
+            if let update = manager.availableUpdate {
+                Button {
+                    manager.openAvailableUpdate()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Update v\(update.version)")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.blue.opacity(0.16)))
+                    .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+                .help("Open MountKeep v\(update.version) on GitHub")
+            }
 
             Button {
                 manager.syncNow()
@@ -543,6 +568,64 @@ public struct PopoverView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var finderQuickTogglesView: some View {
+        HStack(spacing: 8) {
+            Text("Finder")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            finderTogglePill(
+                title: "Hidden Files",
+                systemImage: manager.showHiddenFiles ? "eye.fill" : "eye.slash",
+                isOn: manager.showHiddenFiles
+            ) {
+                manager.setShowHiddenFiles(!manager.showHiddenFiles)
+            }
+            .help("Toggle Finder hidden files and folders (AppleShowAllFiles)")
+
+            finderTogglePill(
+                title: "Extensions",
+                systemImage: manager.showFileExtensions ? "doc.text.fill" : "doc.text",
+                isOn: manager.showFileExtensions
+            ) {
+                manager.setShowFileExtensions(!manager.showFileExtensions)
+            }
+            .help("Toggle all filename extensions in Finder (AppleShowAllExtensions)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+    }
+
+    private func finderTogglePill(
+        title: String,
+        systemImage: String,
+        isOn: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(
+                Capsule()
+                    .fill(isOn ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(isOn ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.08), lineWidth: 0.75)
+            )
+            .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
     }
 
     private var footerTooltip: String {
