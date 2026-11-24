@@ -269,6 +269,7 @@ final class MountKeepTests: XCTestCase {
         XCTAssertNil(migrated.servers[0].macAddress)
         XCTAssertEqual(migrated.idlePollIntervalSeconds, 120)
         XCTAssertTrue(migrated.cleanupStaleMountsOnAway)
+        XCTAssertFalse(migrated.unmountOnSleep)
         XCTAssertTrue(migrated.healZombieMounts)
         XCTAssertTrue(migrated.notifyOnAuthFailure)
         XCTAssertEqual(migrated.storageUnitStyle, .binaryHuman)
@@ -581,5 +582,63 @@ final class MountKeepTests: XCTestCase {
         XCTAssertFalse(HostSyncPolicy.serverNeedsAttention(
             enabledShareStates: [.manuallyUnmounted], hostState: .offline, hasOfflineStrike: false
         ))
+    }
+
+    func testSMBClientConfigReadWriteAndPreservation() throws {
+        // 1. Fresh creation from nil -> enabled -> disabled deletes cleanly (returns nil)
+        let fresh = SMBClientConfig.applyWiFiStability(enabled: true, to: nil)
+        XCTAssertNotNil(fresh)
+        XCTAssertTrue(SMBClientConfig.isWiFiStabilityEnabled(in: fresh ?? ""))
+        XCTAssertNil(SMBClientConfig.applyWiFiStability(enabled: false, to: fresh))
+
+        // 2. Preserves custom keys inside [default] and other server sections
+        let custom = """
+        [default]
+        signing_required=no
+        mc_on=yes
+
+        [STUDIO-NAS]
+        streams=no
+        """
+        XCTAssertFalse(SMBClientConfig.isWiFiStabilityEnabled(in: custom))
+
+        let enabledCustom = SMBClientConfig.applyWiFiStability(enabled: true, to: custom)!
+        XCTAssertTrue(SMBClientConfig.isWiFiStabilityEnabled(in: enabledCustom))
+        XCTAssertTrue(enabledCustom.contains("signing_required=no"))
+        XCTAssertTrue(enabledCustom.contains("[STUDIO-NAS]"))
+        XCTAssertTrue(enabledCustom.contains("streams=no"))
+        XCTAssertFalse(enabledCustom.contains("mc_on=yes"))
+
+        let disabledCustom = SMBClientConfig.applyWiFiStability(enabled: false, to: enabledCustom)!
+        XCTAssertFalse(SMBClientConfig.isWiFiStabilityEnabled(in: disabledCustom))
+        XCTAssertTrue(disabledCustom.contains("[default]"))
+        XCTAssertTrue(disabledCustom.contains("signing_required=no"))
+        XCTAssertTrue(disabledCustom.contains("[STUDIO-NAS]"))
+        XCTAssertTrue(disabledCustom.contains("streams=no"))
+
+        // 3. Existing file without [default] prepends [default] on enable and prunes empty [default] on disable
+        let serverOnly = "[RENDER-PC]\nstreams=yes\n"
+        let enabledServerOnly = SMBClientConfig.applyWiFiStability(enabled: true, to: serverOnly)!
+        XCTAssertTrue(SMBClientConfig.isWiFiStabilityEnabled(in: enabledServerOnly))
+        XCTAssertTrue(enabledServerOnly.contains("[RENDER-PC]"))
+        let disabledServerOnly = SMBClientConfig.applyWiFiStability(enabled: false, to: enabledServerOnly)!
+        XCTAssertFalse(disabledServerOnly.contains("[default]"))
+        XCTAssertTrue(disabledServerOnly.contains("[RENDER-PC]"))
+        XCTAssertTrue(disabledServerOnly.contains("streams=yes"))
+
+        // 4. End-to-end file round trip in temp directory
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MountKeepNSMBTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fileURL = tempDir.appendingPathComponent("nsmb.conf")
+
+        XCTAssertFalse(SMBClientConfig.isWiFiStabilityEnabled(at: fileURL))
+        try SMBClientConfig.setWiFiStabilityEnabled(true, at: fileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        XCTAssertTrue(SMBClientConfig.isWiFiStabilityEnabled(at: fileURL))
+
+        try SMBClientConfig.setWiFiStabilityEnabled(false, at: fileURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        XCTAssertFalse(SMBClientConfig.isWiFiStabilityEnabled(at: fileURL))
     }
 }

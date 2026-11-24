@@ -43,6 +43,9 @@ public final class MountManager: ObservableObject {
     @Published public private(set) var dontWriteNetworkDSStore: Bool
     @Published public private(set) var showHiddenFiles: Bool
     @Published public private(set) var showFileExtensions: Bool
+    @Published public private(set) var smbWiFiStabilityEnabled: Bool
+    @Published public private(set) var smbStabilityNeedsReconnect: Bool = false
+    @Published public private(set) var isReconnectingShares: Bool = false
     @Published public private(set) var availableUpdate: AppReleaseInfo?
     @Published public private(set) var isCheckingForUpdates: Bool = false
     @Published public private(set) var updateCheckStatus: String?
@@ -90,6 +93,7 @@ public final class MountManager: ObservableObject {
         self.dontWriteNetworkDSStore = FinderPreferences.dontWriteNetworkDSStore
         self.showHiddenFiles = FinderPreferences.showHiddenFiles
         self.showFileExtensions = FinderPreferences.showFileExtensions
+        self.smbWiFiStabilityEnabled = SMBClientConfig.isWiFiStabilityEnabled()
     }
 
     // MARK: - Computed Status
@@ -223,9 +227,13 @@ public final class MountManager: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.healthFailureCounts.removeAll()
-                self?.hostOfflineStrikes.removeAll()
-                self?.lastHostSyncDate.removeAll()
+                guard let self else { return }
+                self.healthFailureCounts.removeAll()
+                self.hostOfflineStrikes.removeAll()
+                self.lastHostSyncDate.removeAll()
+                if self.config.unmountOnSleep {
+                    await self.unmountIdleSharesForSleep()
+                }
             }
         }
 
@@ -468,12 +476,10 @@ public final class MountManager: ObservableObject {
             }
 
             var isOnlineNow = probe.isReachable
-            if !isOnlineNow {
-                let mountedPoints = latestServer.shares.compactMap { self.shareStates[$0.id]?.mountPoint }
-                if !mountedPoints.isEmpty {
-                    let healthResults = await self.probeMountedSharesHealth(mountPoints: mountedPoints, timeout: 2.0)
-                    isOnlineNow = healthResults.values.contains(.healthy)
-                }
+            if !isOnlineNow,
+               let canaryMount = latestServer.shares.compactMap({ self.shareStates[$0.id]?.mountPoint }).first {
+                let health = await NetFSMounter.checkMountHealth(mountPoint: canaryMount, timeout: 2.0)
+                isOnlineNow = (health == .healthy)
             }
 
             guard !Task.isCancelled, self.hostStates[serverID] != .shuttingDown else { return }
@@ -510,27 +516,7 @@ public final class MountManager: ObservableObject {
         }
     }
 
-    private func probeMountedSharesHealth(
-        mountPoints: [String],
-        timeout: TimeInterval
-    ) async -> [String: MountHealth] {
-        guard !mountPoints.isEmpty else { return [:] }
-        return await withTaskGroup(of: (String, MountHealth).self) { group in
-            for mp in mountPoints {
-                group.addTask {
-                    let health = await NetFSMounter.checkMountHealth(mountPoint: mp, timeout: timeout)
-                    return (mp, health)
-                }
-            }
-            var results: [String: MountHealth] = [:]
-            for await (mp, health) in group {
-                results[mp] = health
-            }
-            return results
-        }
-    }
-
-    /// Asynchronously refreshes live disk usage (`statfs`) for mounted shares on non-away servers.
+    /// Asynchronously refreshes live disk usage (`statfs`) for mounted shares on online, non-away servers.
     /// Throttled to at most once every 10 seconds unless `force == true`.
     public func refreshCapacities(force: Bool = false) async {
         guard !isRefreshingCapacities else { return }
@@ -539,7 +525,10 @@ public final class MountManager: ObservableObject {
         }
 
         var targets: [(shareID: UUID, mountPoint: String)] = []
-        for server in config.servers where !isServerAway(server) {
+        for server in config.servers
+        where !isServerAway(server)
+            && hostStates[server.id]?.isOnline == true
+            && (hostOfflineStrikes[server.id] ?? 0) == 0 {
             for share in server.shares where share.enabled {
                 if case .mounted(let mp) = shareStates[share.id] {
                     targets.append((share.id, mp))
@@ -749,6 +738,8 @@ public final class MountManager: ObservableObject {
 
         var reachableByServer: [UUID: Bool] = [:]
         var precomputedHealthByMountPoint: [String: MountHealth] = [:]
+        var strikeHoldingServers: Set<UUID> = []
+        var confirmedOfflineServers: Set<UUID> = []
         var learnedAnyMAC = false
         for (serverID, result) in probeResults {
             if !result.allIPs.isEmpty {
@@ -774,13 +765,14 @@ public final class MountManager: ObservableObject {
                 let srv = config.servers.first(where: { $0.id == serverID })
                 let mountedPoints = srv?.shares.compactMap { shareStates[$0.id]?.mountPoint } ?? []
 
+                // Probe only a single canary share (instead of all shares at once) so a brief network
+                // blip doesn't touch every VFS mount and provoke macOS's "Server connections interrupted" alert.
                 var anyMountedShareHealthy = false
-                if previousState != .shuttingDown && previousState != .waking && !mountedPoints.isEmpty {
-                    let healthByMount = await probeMountedSharesHealth(mountPoints: mountedPoints, timeout: 2.5)
-                    for (mp, health) in healthByMount {
-                        precomputedHealthByMountPoint[mp] = health
-                    }
-                    anyMountedShareHealthy = healthByMount.values.contains(.healthy)
+                if previousState != .shuttingDown && previousState != .waking,
+                   let canaryMount = mountedPoints.first {
+                    let health = await NetFSMounter.checkMountHealth(mountPoint: canaryMount, timeout: 2.0)
+                    precomputedHealthByMountPoint[canaryMount] = health
+                    anyMountedShareHealthy = (health == .healthy)
                 }
 
                 let outcome = HostSyncPolicy.evaluateFailedHostProbe(
@@ -800,8 +792,12 @@ public final class MountManager: ObservableObject {
                     wakePollTasks[serverID]?.cancel()
                     wakePollTasks[serverID] = nil
                 } else if outcome.nextStrikes > 0, let host = srv?.host {
+                    strikeHoldingServers.insert(serverID)
                     logger.warn("Host probe failed for \(host) while \(mountedPoints.count) share(s) mounted (strike \(outcome.nextStrikes)/2) — holding online state for re-verification")
                 } else if outcome.nextHostState == .offline {
+                    if !mountedPoints.isEmpty {
+                        confirmedOfflineServers.insert(serverID)
+                    }
                     shutdownPollTasks[serverID]?.cancel()
                     shutdownPollTasks[serverID] = nil
                 }
@@ -838,6 +834,8 @@ public final class MountManager: ObservableObject {
             await healStaleMountsIfNeeded(
                 for: eligibleServers,
                 reachableByServer: reachableByServer,
+                strikeHoldingServers: strikeHoldingServers,
+                confirmedOfflineServers: confirmedOfflineServers,
                 precomputedHealthByMountPoint: precomputedHealthByMountPoint
             )
         }
@@ -919,11 +917,32 @@ public final class MountManager: ObservableObject {
     private func healStaleMountsIfNeeded(
         for servers: [ServerConfig],
         reachableByServer: [UUID: Bool],
+        strikeHoldingServers: Set<UUID> = [],
+        confirmedOfflineServers: Set<UUID> = [],
         precomputedHealthByMountPoint: [String: MountHealth] = [:]
     ) async {
         var toProbe: [(server: ServerConfig, share: ShareConfig, mountPoint: String)] = []
         var alreadyMeasured: [(ServerConfig, ShareConfig, String, MountHealth)] = []
+        var directForceUnmount: [(server: ServerConfig, share: ShareConfig, mountPoint: String)] = []
+
         for server in servers {
+            // Skip probing shares on a strike-1 transient network blip so we don't touch every mount
+            // and trigger macOS's "Server connections interrupted" dialog while Wi-Fi recovers.
+            if strikeHoldingServers.contains(server.id) {
+                continue
+            }
+
+            // Server was confirmed offline across 2 checks — force-unmount stale shares directly
+            // without first issuing blocking opendir() calls against dead sockets.
+            if confirmedOfflineServers.contains(server.id) {
+                for share in server.shares where share.enabled {
+                    if case .mounted(let mp) = shareStates[share.id], !inFlightHealthChecks.contains(share.id) {
+                        directForceUnmount.append((server, share, mp))
+                    }
+                }
+                continue
+            }
+
             for share in server.shares where share.enabled {
                 if case .mounted(let mp) = shareStates[share.id], !inFlightHealthChecks.contains(share.id) {
                     if let cached = precomputedHealthByMountPoint[mp] {
@@ -934,7 +953,18 @@ public final class MountManager: ObservableObject {
                 }
             }
         }
-        guard !toProbe.isEmpty || !alreadyMeasured.isEmpty else { return }
+
+        guard !toProbe.isEmpty || !alreadyMeasured.isEmpty || !directForceUnmount.isEmpty else { return }
+
+        var healedAny = false
+        for (server, share, mountPoint) in directForceUnmount {
+            shareStates[share.id] = .healing
+            logger.warn("Host \(server.host) confirmed offline — force-unmounting stale share \(mountPoint)")
+            _ = await NetFSMounter.forceUnmount(mountPoint: mountPoint)
+            healthFailureCounts[share.id] = nil
+            shareStates[share.id] = .hostOffline
+            healedAny = true
+        }
 
         for item in toProbe {
             inFlightHealthChecks.insert(item.share.id)
@@ -961,7 +991,6 @@ public final class MountManager: ObservableObject {
 
         let results = alreadyMeasured + probedResults
 
-        var healedAny = false
         for (server, share, mountPoint, health) in results {
             inFlightHealthChecks.remove(share.id)
             switch health {
@@ -1652,6 +1681,98 @@ public final class MountManager: ObservableObject {
         saveConfig()
     }
 
+    public func setUnmountOnSleep(_ enabled: Bool) {
+        config.unmountOnSleep = enabled
+        saveConfig()
+        logger.info("Unmount idle shares on Mac sleep set to \(enabled)")
+    }
+
+    public func setSMBWiFiStabilityEnabled(_ enabled: Bool) {
+        do {
+            try SMBClientConfig.setWiFiStabilityEnabled(enabled)
+            smbWiFiStabilityEnabled = SMBClientConfig.isWiFiStabilityEnabled()
+            smbStabilityNeedsReconnect = (mountedEnabledShareCount > 0)
+            logger.info("SMB Wi-Fi stability (~/Library/Preferences/nsmb.conf) set to \(smbWiFiStabilityEnabled)")
+        } catch {
+            logger.error("Failed to update nsmb.conf: \(error.localizedDescription)")
+            statusBanner = "Could not update nsmb.conf: \(error.localizedDescription)"
+        }
+    }
+
+    /// Gracefully unmounts idle shares (leaving any busy shares/transfers untouched) and remounts them
+    /// so updated `~/Library/Preferences/nsmb.conf` settings take effect immediately.
+    public func reconnectIdleSharesForSMBConfig() {
+        guard !isReconnectingShares else { return }
+        let targets: [(shareID: UUID, name: String, mountPoint: String)] = enabledShares.compactMap { (_, share) in
+            guard let mp = shareStates[share.id]?.mountPoint else { return nil }
+            return (share.id, share.name, mp)
+        }
+        guard !targets.isEmpty else {
+            smbStabilityNeedsReconnect = false
+            return
+        }
+
+        isReconnectingShares = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isReconnectingShares = false }
+
+            var busyNames: [String] = []
+            for target in targets {
+                let res = await NetFSMounter.unmount(mountPoint: target.mountPoint)
+                switch res {
+                case .success:
+                    self.shareStates[target.shareID] = .unmounted
+                case .failure:
+                    busyNames.append(target.name)
+                }
+            }
+
+            self.refreshMountedSnapshotOnly()
+            self.clearBackoffs()
+            await self.checkAll(forceRetry: true)
+
+            if busyNames.isEmpty {
+                self.smbStabilityNeedsReconnect = false
+                self.logger.info("Reconnected SMB shares with updated nsmb.conf settings")
+            } else {
+                self.statusBanner = "Skipped busy share(s): \(busyNames.joined(separator: ", ")). They will use the new SMB settings on next reconnect."
+            }
+        }
+    }
+
+    /// Gracefully unmounts idle shares right before macOS sleeps (skips busy shares cleanly).
+    private func unmountIdleSharesForSleep() async {
+        let targets: [(shareID: UUID, mountPoint: String)] = enabledShares.compactMap { (_, share) in
+            guard let mp = shareStates[share.id]?.mountPoint else { return nil }
+            return (share.id, mp)
+        }
+        guard !targets.isEmpty else { return }
+
+        let outcomes: [(UUID, Bool)] = await withTaskGroup(of: (UUID, Bool).self) { group in
+            for target in targets {
+                group.addTask {
+                    let res = await NetFSMounter.unmount(mountPoint: target.mountPoint)
+                    if case .success = res { return (target.shareID, true) }
+                    return (target.shareID, false)
+                }
+            }
+            var out: [(UUID, Bool)] = []
+            for await item in group { out.append(item) }
+            return out
+        }
+
+        var unmountedCount = 0
+        for (shareID, succeeded) in outcomes where succeeded {
+            shareStates[shareID] = .unmounted
+            unmountedCount += 1
+        }
+        if unmountedCount > 0 {
+            logger.info("Gracefully unmounted \(unmountedCount) idle share(s) before Mac sleep")
+            refreshMountedSnapshotOnly()
+        }
+    }
+
     public func setHealZombieMounts(_ enabled: Bool) {
         config.healZombieMounts = enabled
         saveConfig()
@@ -1684,6 +1805,7 @@ public final class MountManager: ObservableObject {
         dontWriteNetworkDSStore = FinderPreferences.dontWriteNetworkDSStore
         showHiddenFiles = FinderPreferences.showHiddenFiles
         showFileExtensions = FinderPreferences.showFileExtensions
+        smbWiFiStabilityEnabled = SMBClientConfig.isWiFiStabilityEnabled()
     }
 
     // MARK: - App Updates
@@ -1771,7 +1893,7 @@ public final class MountManager: ObservableObject {
 
     public func reloadConfigFromDisk() {
         config = configStore.load()
-        dontWriteNetworkDSStore = FinderPreferences.dontWriteNetworkDSStore
+        refreshFinderPreferences()
         refreshMountedSnapshotOnly()
         Task { await checkAll(forceRetry: true) }
     }

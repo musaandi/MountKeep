@@ -3,6 +3,7 @@ import SwiftUI
 public enum SettingsTab: Hashable, Sendable {
     case servers
     case network
+    case general
 }
 
 public struct SettingsView: View {
@@ -66,12 +67,13 @@ public struct SettingsView: View {
     public var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $selectedTab) {
-                Text("Servers & Shares").tag(SettingsTab.servers)
-                Text("Network & System").tag(SettingsTab.network)
+                Text("Servers").tag(SettingsTab.servers)
+                Text("Network & Power").tag(SettingsTab.network)
+                Text("General").tag(SettingsTab.general)
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 300)
+            .frame(width: 380)
             .padding(.vertical, 10)
 
             Divider()
@@ -80,7 +82,9 @@ public struct SettingsView: View {
             case .servers:
                 serversTab
             case .network:
-                networkAndSystemTab
+                networkAndPowerTab
+            case .general:
+                generalTab
             }
         }
         .frame(minWidth: 620, minHeight: 560)
@@ -252,7 +256,7 @@ public struct SettingsView: View {
                         }
                     } label: {
                         if isScanning {
-                            ProgressView().controlSize(.small)
+                            ProgressView().controlSize(.mini)
                         } else {
                             Label("Scan", systemImage: "magnifyingglass")
                         }
@@ -557,15 +561,26 @@ public struct SettingsView: View {
         )
     }
 
-    // MARK: - Tab 2: Network & System
+    // MARK: - Tab 2: Network & Power
 
-    private var networkAndSystemTab: some View {
+    private var networkAndPowerTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 homeNetworkSection
                 remotePowerSection
-                reliabilitySection
-                pollingAndStartupSection
+            }
+            .padding(14)
+        }
+    }
+
+    // MARK: - Tab 3: General
+
+    private var generalTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                stabilitySection
+                finderAndDisplaySection
+                pollingAndUpdatesSection
             }
             .padding(14)
         }
@@ -848,98 +863,137 @@ public struct SettingsView: View {
         }
     }
 
-    private var reliabilitySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Reliability & macOS Integration")
+    private var stabilitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("SMB Stability & Mounts")
                 .font(.headline)
 
+            HStack(spacing: 8) {
+                Toggle(
+                    "Stabilize SMB over Wi-Fi (nsmb.conf)",
+                    isOn: Binding(
+                        get: { manager.smbWiFiStabilityEnabled },
+                        set: { manager.setSMBWiFiStabilityEnabled($0) }
+                    )
+                )
+                .font(.system(size: 12.5))
+                .help("Writes mc_on=no and max_resp_timeout=60 to ~/Library/Preferences/nsmb.conf (no admin password needed) to reduce Wi-Fi SMB multichannel dropouts and transfer interruptions.")
+
+                Spacer()
+
+                if manager.smbStabilityNeedsReconnect {
+                    Text("Applies on reconnect")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Button(manager.isReconnectingShares ? "Reconnecting…" : "Reconnect Idle") {
+                        manager.reconnectIdleSharesForSMBConfig()
+                    }
+                    .controlSize(.small)
+                    .disabled(manager.isReconnectingShares)
+                    .help("Gracefully unmounts idle shares (skips busy transfers) and remounts them with the updated SMB settings")
+                }
+            }
+
             Toggle(
-                "Clean up stale home mounts when away from home",
+                "Unmount idle shares before Mac sleep",
+                isOn: Binding(
+                    get: { manager.config.unmountOnSleep },
+                    set: { manager.setUnmountOnSleep($0) }
+                )
+            )
+            .font(.system(size: 12.5))
+            .help("Gracefully unmounts idle shares when your Mac sleeps (active transfers are skipped) and remounts automatically on wake to prevent \"Server connections interrupted\" alerts.")
+
+            Toggle(
+                "Clean up stale mounts when away from home",
                 isOn: Binding(
                     get: { manager.config.cleanupStaleMountsOnAway },
                     set: { manager.setCleanupStaleMountsOnAway($0) }
                 )
             )
             .font(.system(size: 12.5))
-            Text("Force-unmounts dead home SMB shares after a 4s grace check when you join another network, preventing Finder beachballs.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
+            .help("Force-unmounts dead home SMB shares after a 4s grace check when you join another network.")
 
             Toggle(
-                "Self-heal zombie / unresponsive mounts",
+                "Self-heal unresponsive mounts",
                 isOn: Binding(
                     get: { manager.config.healZombieMounts },
                     set: { manager.setHealZombieMounts($0) }
                 )
             )
             .font(.system(size: 12.5))
-            Text("Detects hung SMB mounts after a Windows reboot/sleep, force-unmounts the dead mount, and remounts cleanly.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
+            .help("Detects hung SMB mounts after a server reboot or sleep, force-unmounts them, and remounts cleanly.")
 
             Toggle(
-                "Notify on Keychain authentication failures",
+                "Notify on Keychain auth failures",
                 isOn: Binding(
                     get: { manager.config.notifyOnAuthFailure },
                     set: { manager.setNotifyOnAuthFailure($0) }
                 )
             )
             .font(.system(size: 12.5))
-            Text("Sends a single macOS alert (max once per 30m per server) if a saved Windows password stops working.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
+            .help("Sends at most one macOS notification every 30 minutes per server if a saved password stops working.")
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
 
-            Divider()
+    private var finderAndDisplaySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Finder & Display")
+                .font(.headline)
 
-            Toggle(
-                "Prevent Finder from writing .DS_Store files on network shares",
-                isOn: Binding(
-                    get: { manager.dontWriteNetworkDSStore },
-                    set: { manager.setDontWriteNetworkDSStore($0) }
+            HStack(spacing: 16) {
+                Toggle(
+                    "No .DS_Store on SMB",
+                    isOn: Binding(
+                        get: { manager.dontWriteNetworkDSStore },
+                        set: { manager.setDontWriteNetworkDSStore($0) }
+                    )
                 )
-            )
-            .font(.system(size: 12.5))
-            Text("Sets macOS's com.apple.desktopservices DSDontWriteNetworkStores preference (applies to new Finder sessions).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12.5))
+                .help("Sets com.apple.desktopservices DSDontWriteNetworkStores so Finder stops writing .DS_Store files on network drives.")
 
-            Toggle(
-                "Show hidden files and folders in Finder",
-                isOn: Binding(
-                    get: { manager.showHiddenFiles },
-                    set: { manager.setShowHiddenFiles($0) }
+                Toggle(
+                    "Hidden files",
+                    isOn: Binding(
+                        get: { manager.showHiddenFiles },
+                        set: { manager.setShowHiddenFiles($0) }
+                    )
                 )
-            )
-            .font(.system(size: 12.5))
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12.5))
+                .help("Toggles AppleShowAllFiles in Finder and Open/Save dialogs (restarts Finder).")
 
-            Toggle(
-                "Show all filename extensions in Finder",
-                isOn: Binding(
-                    get: { manager.showFileExtensions },
-                    set: { manager.setShowFileExtensions($0) }
+                Toggle(
+                    "File extensions",
+                    isOn: Binding(
+                        get: { manager.showFileExtensions },
+                        set: { manager.setShowFileExtensions($0) }
+                    )
                 )
-            )
-            .font(.system(size: 12.5))
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12.5))
+                .help("Toggles AppleShowAllExtensions live across Finder and Spotlight via LaunchServices.")
 
-            Text("Hidden files restarts Finder to refresh windows; extensions updates Finder and Spotlight live via LaunchServices.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 18)
+                Spacer()
+            }
 
             Divider()
 
             HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Storage capacity units")
-                        .font(.system(size: 12.5))
-                    Text("Base-2 (1024, GB/TB) matches Windows Explorer; Decimal (1000) matches macOS Finder.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Storage units")
+                    .font(.system(size: 12.5))
+                    .help("Base-2 (1024, GB/TB) matches Windows Explorer; Decimal (1000) matches macOS Finder.")
                 Spacer()
                 Picker("", selection: Binding(
                     get: { manager.config.storageUnitStyle },
@@ -950,35 +1004,95 @@ public struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 230)
+                .frame(width: 240)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var pollingAndUpdatesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Polling, Startup & Updates")
+                .font(.headline)
+
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Text("Offline check:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { manager.config.pollIntervalSeconds },
+                        set: { manager.updatePollInterval($0) }
+                    )) {
+                        ForEach(activeIntervalOptions, id: \.1) { label, value in
+                            Text(label).tag(value)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 112)
+                }
+
+                HStack(spacing: 6) {
+                    Text("Idle:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { manager.config.idlePollIntervalSeconds },
+                        set: { manager.updateIdlePollInterval($0) }
+                    )) {
+                        ForEach(idleIntervalOptions, id: \.1) { label, value in
+                            Text(label).tag(value)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 112)
+                }
+
+                Spacer()
+
+                Toggle("Launch at Login", isOn: Binding(
+                    get: { manager.launchAtLogin },
+                    set: { manager.setLaunchAtLogin($0) }
+                ))
+                .font(.system(size: 12.5))
             }
 
             Divider()
 
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Updates (v\(UpdateChecker.currentAppVersion()))")
-                        .font(.system(size: 12.5))
+                    Text("MountKeep v\(UpdateChecker.currentAppVersion())")
+                        .font(.system(size: 12.5, weight: .medium))
                     if let status = manager.updateCheckStatus {
                         Text(status)
                             .font(.caption)
                             .foregroundStyle(manager.availableUpdate != nil ? .blue : .secondary)
                     } else {
-                        Text("Checks GitHub Releases (musaandi/MountKeep) for new versions.")
+                        Text("Current cadence: \(manager.activePollCadence.label)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
+
                 Spacer()
+
                 if let update = manager.availableUpdate {
                     if let onOpenReleaseNotes {
-                        Button("Release Notes") {
+                        Button("Notes") {
                             onOpenReleaseNotes(.updateAvailable(update))
                         }
                         .controlSize(.small)
                         .disabled(manager.updateInstallProgress.isBusy)
                     } else {
-                        Button("View Page") {
+                        Button("View") {
                             manager.openAvailableUpdate()
                         }
                         .controlSize(.small)
@@ -999,100 +1113,32 @@ public struct SettingsView: View {
                     }
                     .controlSize(.small)
                 }
+
                 Button(manager.isCheckingForUpdates ? "Checking…" : "Check Now") {
                     Task { await manager.checkForUpdates(manual: true) }
                 }
                 .controlSize(.small)
                 .disabled(manager.isCheckingForUpdates || manager.updateInstallProgress.isBusy)
-            }
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-    }
 
-    private var pollingAndStartupSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Adaptive Polling & Startup")
-                .font(.headline)
-
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("While waiting for offline PCs:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { manager.config.pollIntervalSeconds },
-                        set: { manager.updatePollInterval($0) }
-                    )) {
-                        ForEach(activeIntervalOptions, id: \.1) { label, value in
-                            Text(label).tag(value)
-                        }
+                Menu("Tools") {
+                    Button("Reset NetAuthSysAgent") {
+                        manager.restartNetAuthAgentNow()
                     }
-                    .labelsHidden()
-                    .frame(width: 130)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("When all shares are mounted:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { manager.config.idlePollIntervalSeconds },
-                        set: { manager.updateIdlePollInterval($0) }
-                    )) {
-                        ForEach(idleIntervalOptions, id: \.1) { label, value in
-                            Text(label).tag(value)
-                        }
+                    Divider()
+                    Button("Open config.json") {
+                        manager.openConfigFile()
                     }
-                    .labelsHidden()
-                    .frame(width: 130)
+                    Button("Reload Config") {
+                        manager.reloadConfigFromDisk()
+                    }
+                    Button("Open Log") {
+                        manager.openLogFile()
+                    }
                 }
-
-                Spacer()
-
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { manager.launchAtLogin },
-                    set: { manager.setLaunchAtLogin($0) }
-                ))
-                .font(.system(size: 12.5))
-            }
-
-            Divider()
-
-            HStack(spacing: 10) {
-                Text("Current cadence: \(manager.activePollCadence.label)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button("Reset NetAuth") {
-                    manager.restartNetAuthAgentNow()
-                }
+                .menuStyle(.borderedButton)
                 .controlSize(.small)
-                .help("Restart macOS's NetAuthSysAgent daemon if SMB mounts become stuck")
-
-                Button("Open config.json") {
-                    manager.openConfigFile()
-                }
-                .controlSize(.small)
-
-                Button("Reload Config") {
-                    manager.reloadConfigFromDisk()
-                }
-                .controlSize(.small)
-
-                Button("Open Log") {
-                    manager.openLogFile()
-                }
-                .controlSize(.small)
+                .fixedSize()
+                .help("Diagnostics, NetAuth recovery, config & log files")
             }
         }
         .padding(12)

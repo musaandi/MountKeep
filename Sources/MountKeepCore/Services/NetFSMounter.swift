@@ -55,12 +55,14 @@ public enum NetFSMounter {
         }
     }
 
-    /// Silently mounts an SMB share using macOS's native NetFS framework & Keychain (`NoUI`, `SoftMount`).
+    /// Silently mounts an SMB share using macOS's native NetFS framework & Keychain (`NoUI`).
+    /// Matches Finder's default mount semantics (no forced `SoftMount`) so active transfers survive
+    /// brief Wi-Fi or drive spin-up stalls instead of aborting on the 30s `kern_soft_deadtimer`.
     public static func mount(
         host: String,
         username: String,
         shareName: String,
-        timeout: TimeInterval = 15
+        timeout: TimeInterval = 30
     ) async -> MountOutcome {
         guard let url = MountInspector.buildSMBURL(host: host, username: username, shareName: shareName) else {
             return .failed(code: EINVAL, message: "Invalid SMB URL for \(host)/\(shareName)", isAuthError: false)
@@ -70,7 +72,6 @@ public enum NetFSMounter {
         openOpts[kNAUIOptionKey] = kNAUIOptionNoUI
 
         let mountOpts = NSMutableDictionary()
-        mountOpts[kNetFSSoftMountKey] = true
 
         return await withCheckedContinuation { continuation in
             let gate = OnceGate()

@@ -2,6 +2,19 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.6.2] - 2026-11-23
+
+### Added
+- **Stabilize SMB over Wi-Fi (`nsmb.conf`):** Added a 1-click toggle in **Settings → General** that manages `mc_on=no` and `max_resp_timeout=60` in `~/Library/Preferences/nsmb.conf` (no admin password needed, preserving any custom `nsmb.conf` entries), plus an optional **Reconnect Idle** action that safely skips active transfers.
+- **Unmount Idle Shares Before Mac Sleep:** Added an optional toggle in **Settings → General** to gracefully unmount idle shares on `willSleepNotification` (skipping busy shares cleanly) and remount them on wake, preventing post-wake *"Server connections interrupted"* alerts.
+
+### Fixed
+- **Finder-Matched Mount Mode (Stopped Forced `SoftMount`):** Removed `kNetFSSoftMountKey = true` from `NetFSMounter.mount` so active file transfers survive brief Wi-Fi or drive spin-up stalls instead of aborting on macOS's 30s `kern_soft_deadtimer`.
+- **Avoided Provoking `Server connections interrupted` Popups:** Skipped `statfs` capacity probes on non-online or strike-holding servers, limited failed-`:445` health verification to a single canary share (instead of probing every mount simultaneously), skipped health-check touches during strike-1 transient blips, and force-unmounted confirmed-offline stale mounts directly.
+
+### Improved
+- **Cleaner Settings Layout:** Reorganized Settings into 3 focused tabs (**Servers**, **Network & Power**, **General**), replaced repetitive helper paragraphs with concise macOS hover tooltips, compacted Finder toggles into one row, and consolidated diagnostic actions (`Reset NetAuthSysAgent`, config, log) into a single **Tools** menu.
+
 ## [1.6.1] - 2026-11-23
 
 ### Fixed

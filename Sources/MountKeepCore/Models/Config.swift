@@ -154,6 +154,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var mountTimeoutSeconds: Int
     public var paused: Bool
     public var cleanupStaleMountsOnAway: Bool
+    public var unmountOnSleep: Bool
     public var healZombieMounts: Bool
     public var notifyOnAuthFailure: Bool
     public var storageUnitStyle: StorageUnitStyle
@@ -167,6 +168,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         mountTimeoutSeconds: Int = 30,
         paused: Bool = false,
         cleanupStaleMountsOnAway: Bool = true,
+        unmountOnSleep: Bool = false,
         healZombieMounts: Bool = true,
         notifyOnAuthFailure: Bool = true,
         storageUnitStyle: StorageUnitStyle = .binaryHuman,
@@ -179,6 +181,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.mountTimeoutSeconds = min(max(mountTimeoutSeconds, 5), 60)
         self.paused = paused
         self.cleanupStaleMountsOnAway = cleanupStaleMountsOnAway
+        self.unmountOnSleep = unmountOnSleep
         self.healZombieMounts = healZombieMounts
         self.notifyOnAuthFailure = notifyOnAuthFailure
         self.storageUnitStyle = storageUnitStyle
@@ -193,6 +196,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         case mountTimeoutSeconds
         case paused
         case cleanupStaleMountsOnAway
+        case unmountOnSleep
         case healZombieMounts
         case notifyOnAuthFailure
         case storageUnitStyle
@@ -208,6 +212,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         let timeout = try container.decodeIfPresent(Int.self, forKey: .mountTimeoutSeconds) ?? 30
         let paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         let cleanup = try container.decodeIfPresent(Bool.self, forKey: .cleanupStaleMountsOnAway) ?? true
+        let sleepUnmount = try container.decodeIfPresent(Bool.self, forKey: .unmountOnSleep) ?? false
         let heal = try container.decodeIfPresent(Bool.self, forKey: .healZombieMounts) ?? true
         let notify = try container.decodeIfPresent(Bool.self, forKey: .notifyOnAuthFailure) ?? true
         let unitStyle = try container.decodeIfPresent(StorageUnitStyle.self, forKey: .storageUnitStyle) ?? .binaryHuman
@@ -221,6 +226,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
             mountTimeoutSeconds: timeout,
             paused: paused,
             cleanupStaleMountsOnAway: cleanup,
+            unmountOnSleep: sleepUnmount,
             healZombieMounts: heal,
             notifyOnAuthFailure: notify,
             storageUnitStyle: unitStyle,
@@ -238,6 +244,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
             mountTimeoutSeconds: 30,
             paused: false,
             cleanupStaleMountsOnAway: true,
+            unmountOnSleep: false,
             healZombieMounts: true,
             notifyOnAuthFailure: true,
             storageUnitStyle: .binaryHuman,

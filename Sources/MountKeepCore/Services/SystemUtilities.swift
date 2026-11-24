@@ -402,3 +402,191 @@ public enum FinderPreferences {
         }
     }
 }
+
+// MARK: - Per-User SMB Client Stability Tuning (~/Library/Preferences/nsmb.conf)
+
+public enum SMBClientConfig {
+    private static let managedHeader = "# Managed by MountKeep (SMB Wi-Fi stability)"
+
+    public static var userConfigURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/nsmb.conf")
+    }
+
+    public static func isWiFiStabilityEnabled(at url: URL = userConfigURL) -> Bool {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return isWiFiStabilityEnabled(in: content)
+    }
+
+    public static func setWiFiStabilityEnabled(_ enabled: Bool, at url: URL = userConfigURL) throws {
+        let existing = try? String(contentsOf: url, encoding: .utf8)
+        let updated = applyWiFiStability(enabled: enabled, to: existing)
+        if let updated {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try updated.write(to: url, atomically: true, encoding: .utf8)
+        } else if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// Parses `[default]` in an `nsmb.conf` string and returns true when `mc_on=no` and `max_resp_timeout >= 60`.
+    public static func isWiFiStabilityEnabled(in content: String) -> Bool {
+        var inDefault = false
+        var mcOff = false
+        var respTimeoutOK = false
+
+        for rawLine in content.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") || line.hasPrefix(";") { continue }
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                let section = line.dropFirst().dropLast().trimmingCharacters(in: .whitespaces).lowercased()
+                inDefault = (section == "default")
+                continue
+            }
+            guard inDefault, let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            let val = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces).lowercased()
+            if key == "mc_on" {
+                mcOff = (val == "no" || val == "0" || val == "false")
+            } else if key == "max_resp_timeout" {
+                let digits = val.hasSuffix("s") ? String(val.dropLast()) : val
+                if let secs = Int(digits), secs >= 60 {
+                    respTimeoutOK = true
+                }
+            }
+        }
+        return mcOff && respTimeoutOK
+    }
+
+    /// Applies or removes MountKeep's Wi-Fi SMB stability keys (`mc_on=no`, `max_resp_timeout=60`) inside `[default]`,
+    /// preserving all other user sections and keys intact. Returns `nil` when disabling leaves the file empty.
+    public static func applyWiFiStability(enabled: Bool, to existingContent: String?) -> String? {
+        let trimmedExisting = (existingContent ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if enabled {
+            if trimmedExisting.isEmpty {
+                return "\(managedHeader)\n[default]\nmc_on=no\nmax_resp_timeout=60\n"
+            }
+
+            let lines = (existingContent ?? "").components(separatedBy: .newlines)
+            var out: [String] = []
+            var inDefault = false
+            var foundDefault = false
+            var wroteMC = false
+            var wroteTimeout = false
+
+            func flushMissingDefaultKeys() {
+                if !wroteMC {
+                    out.append("mc_on=no")
+                    wroteMC = true
+                }
+                if !wroteTimeout {
+                    out.append("max_resp_timeout=60")
+                    wroteTimeout = true
+                }
+            }
+
+            for rawLine in lines {
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                    if inDefault {
+                        flushMissingDefaultKeys()
+                    }
+                    let section = trimmed.dropFirst().dropLast().trimmingCharacters(in: .whitespaces).lowercased()
+                    inDefault = (section == "default")
+                    if inDefault { foundDefault = true }
+                    out.append(rawLine)
+                    continue
+                }
+
+                if inDefault, !trimmed.hasPrefix("#"), !trimmed.hasPrefix(";"), let eq = trimmed.firstIndex(of: "=") {
+                    let key = trimmed[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+                    if key == "mc_on" {
+                        out.append("mc_on=no")
+                        wroteMC = true
+                        continue
+                    }
+                    if key == "max_resp_timeout" {
+                        out.append("max_resp_timeout=60")
+                        wroteTimeout = true
+                        continue
+                    }
+                }
+                out.append(rawLine)
+            }
+
+            if inDefault {
+                // Trim trailing blank lines inside [default] before appending keys
+                while out.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+                    out.removeLast()
+                }
+                flushMissingDefaultKeys()
+            } else if !foundDefault {
+                var prefix = ["[default]", "mc_on=no", "max_resp_timeout=60", ""]
+                prefix.append(contentsOf: out)
+                out = prefix
+            }
+
+            let joined = out.joined(separator: "\n").trimmingCharacters(in: .newlines)
+            return joined + "\n"
+        } else {
+            guard !trimmedExisting.isEmpty else { return nil }
+            let lines = (existingContent ?? "").components(separatedBy: .newlines)
+            var out: [String] = []
+            var inDefault = false
+            var defaultHeaderIndex: Int?
+            var defaultHasRemainingEntries = false
+
+            func pruneEmptyDefaultSectionIfNeeded() {
+                if let headerIdx = defaultHeaderIndex, !defaultHasRemainingEntries {
+                    // Remove [default] header and any blank lines immediately after it
+                    while out.count > headerIdx {
+                        out.removeLast()
+                    }
+                }
+                defaultHeaderIndex = nil
+                defaultHasRemainingEntries = false
+            }
+
+            for rawLine in lines {
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+                if trimmed == managedHeader {
+                    continue
+                }
+                if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                    if inDefault {
+                        pruneEmptyDefaultSectionIfNeeded()
+                    }
+                    let section = trimmed.dropFirst().dropLast().trimmingCharacters(in: .whitespaces).lowercased()
+                    inDefault = (section == "default")
+                    if inDefault {
+                        defaultHeaderIndex = out.count
+                        defaultHasRemainingEntries = false
+                    }
+                    out.append(rawLine)
+                    continue
+                }
+                if inDefault, !trimmed.hasPrefix("#"), !trimmed.hasPrefix(";"), let eq = trimmed.firstIndex(of: "=") {
+                    let key = trimmed[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+                    if key == "mc_on" || key == "max_resp_timeout" {
+                        continue
+                    }
+                }
+                if inDefault && !trimmed.isEmpty {
+                    defaultHasRemainingEntries = true
+                }
+                out.append(rawLine)
+            }
+
+            if inDefault {
+                pruneEmptyDefaultSectionIfNeeded()
+            }
+
+            let joined = out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            return joined.isEmpty ? nil : joined + "\n"
+        }
+    }
+}
