@@ -164,7 +164,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         version: Int = AppConfig.currentVersion,
         pollIntervalSeconds: Int = 30,
         idlePollIntervalSeconds: Int = 120,
-        mountTimeoutSeconds: Int = 15,
+        mountTimeoutSeconds: Int = 30,
         paused: Bool = false,
         cleanupStaleMountsOnAway: Bool = true,
         healZombieMounts: Bool = true,
@@ -205,7 +205,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         let ver = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         let poll = try container.decodeIfPresent(Int.self, forKey: .pollIntervalSeconds) ?? 30
         let idle = try container.decodeIfPresent(Int.self, forKey: .idlePollIntervalSeconds) ?? 120
-        let timeout = try container.decodeIfPresent(Int.self, forKey: .mountTimeoutSeconds) ?? 15
+        let timeout = try container.decodeIfPresent(Int.self, forKey: .mountTimeoutSeconds) ?? 30
         let paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         let cleanup = try container.decodeIfPresent(Bool.self, forKey: .cleanupStaleMountsOnAway) ?? true
         let heal = try container.decodeIfPresent(Bool.self, forKey: .healZombieMounts) ?? true

@@ -2,6 +2,14 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.3] - 2026-11-23
+
+### Fixed
+- **Cold SMB Reconnect Timeout:** Raised default `mountTimeoutSeconds` from `15s` to `30s` and guaranteed at least `30s` for the first share mounted on a server (cold SMB session / spun-down archive drives over Wi-Fi), eliminating premature 15s mount cancellations.
+- **Sleep/Wake False Zombie Strikes:** Reset `healthFailureCounts` on macOS sleep & wake (`willSleepNotification` / `didWakeNotification`) and increased post-wake grace delay from `2.5s` to `6s` so laptop sleep/wake cycles stop falsely force-unmounting healthy drives and creating `-1` volume suffixes.
+- **Server-Wide Failure Short-Circuit:** If the first share on an unmounted server hits an auth failure, `EHOSTUNREACH`, or timeout, MountKeep immediately backs off remaining shares on that server instead of looping sequentially through every share.
+- **Wake-on-LAN Cold-Boot Cadence:** Extended WoL follow-up polling (`10s, 10s, 12s, 15s, 15s` over ~62s) to better accommodate full S5 desktop boots.
+
 ## [1.5.2] - 2026-11-23
 
 ### Fixed

@@ -208,6 +208,16 @@ public final class MountManager: ObservableObject {
     private func installObservers() {
         let center = NSWorkspace.shared.notificationCenter
 
+        let sleepToken = center.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.healthFailureCounts.removeAll()
+            }
+        }
+
         let wakeToken = center.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -216,8 +226,9 @@ public final class MountManager: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.logger.info("System woke from sleep — scheduling network & mount check")
+                self.healthFailureCounts.removeAll()
                 self.clearBackoffs()
-                self.scheduleDebouncedCheck(delay: 2.5, forceRetry: true)
+                self.scheduleDebouncedCheck(delay: 6.0, forceRetry: true)
             }
         }
 
@@ -247,7 +258,7 @@ public final class MountManager: ObservableObject {
             }
         }
 
-        workspaceObservers = [wakeToken, mountToken, unmountToken]
+        workspaceObservers = [sleepToken, wakeToken, mountToken, unmountToken]
 
         let extToken = DistributedNotificationCenter.default().addObserver(
             forName: FinderPreferences.showAllExtensionsChangedNotification,
@@ -773,11 +784,18 @@ public final class MountManager: ObservableObject {
         }
     }
 
+    private enum ShareMountStepResult {
+        case mounted
+        case failedSingleShare
+        case failedServerWide(message: String, isAuthError: Bool)
+    }
+
     private func reconcileOnlineServer(serverID: UUID, forceRetry: Bool, timeout: TimeInterval) async {
         guard let server = config.servers.first(where: { $0.id == serverID }) else { return }
 
         for share in server.shares where share.enabled {
             guard !config.paused else { return }
+            if hostStates[serverID] == .shuttingDown { return }
             if shareStates[share.id]?.isMounted == true { continue }
             if manuallyUnmountedShareIDs.contains(share.id) {
                 shareStates[share.id] = .manuallyUnmounted
@@ -787,7 +805,30 @@ public final class MountManager: ObservableObject {
                 continue
             }
 
-            await mountSingleShareInternal(server: server, share: share, timeout: timeout)
+            // Cold SMB sessions (first share mounted on a server, e.g. waking spun-down archive drives
+            // over Wi-Fi) frequently take 16-25s; guarantee at least 30s on the initial share.
+            let anyMountedOnServer = server.shares.contains { shareStates[$0.id]?.isMounted == true }
+            let effectiveTimeout = anyMountedOnServer ? timeout : max(timeout, 30.0)
+
+            let step = await mountSingleShareInternal(server: server, share: share, timeout: effectiveTimeout)
+            if case .failedServerWide(let message, let isAuthError) = step {
+                // Short-circuit remaining unmounted shares on this server so we don't loop 5x30s when
+                // the server/session is unreachable, wedged, or failing Keychain auth.
+                let retryAt = retryDates[share.id]
+                for remaining in server.shares where remaining.enabled && remaining.id != share.id {
+                    guard shareStates[remaining.id]?.isMounted != true,
+                          !manuallyUnmountedShareIDs.contains(remaining.id) else { continue }
+                    if let retryAt {
+                        retryDates[remaining.id] = retryAt
+                    }
+                    shareStates[remaining.id] = .failed(
+                        message: message,
+                        retryAt: retryAt,
+                        isAuthError: isAuthError
+                    )
+                }
+                break
+            }
         }
 
         guard let updatedServer = config.servers.first(where: { $0.id == serverID }),
@@ -826,7 +867,12 @@ public final class MountManager: ObservableObject {
         }
     }
 
-    private func mountSingleShareInternal(server: ServerConfig, share: ShareConfig, timeout: TimeInterval) async {
+    @discardableResult
+    private func mountSingleShareInternal(
+        server: ServerConfig,
+        share: ShareConfig,
+        timeout: TimeInterval
+    ) async -> ShareMountStepResult {
         shareStates[share.id] = .mounting
         logger.info("Mounting smb://\(server.username.isEmpty ? "" : "\(server.username)@")\(server.host)/\(share.name)")
 
@@ -846,8 +892,9 @@ public final class MountManager: ObservableObject {
             shareStates[share.id] = .mounted(mountPoint: mountPoint)
             authNotifier.clearThrottle(forServerID: server.id)
             logger.info("Mounted \(server.host)/\(share.name) at \(mountPoint)")
+            return .mounted
 
-        case .failed(_, let message, let isAuthError):
+        case .failed(let code, let message, let isAuthError):
             let live = MountInspector.mountedSMBShares()
             let ips = hostIPCache[server.id] ?? []
             if let existing = live.first(where: {
@@ -862,7 +909,7 @@ public final class MountManager: ObservableObject {
                 retryDates[share.id] = nil
                 shareStates[share.id] = .mounted(mountPoint: existing.mountPoint)
                 authNotifier.clearThrottle(forServerID: server.id)
-                return
+                return .mounted
             }
 
             let count = (failureCounts[share.id] ?? 0) + 1
@@ -881,6 +928,13 @@ public final class MountManager: ObservableObject {
                     shareName: share.name
                 )
             }
+
+            let anyMountedOnServer = server.shares.contains { shareStates[$0.id]?.isMounted == true }
+            let isServerWideFailure = isAuthError || (!anyMountedOnServer && (code == EHOSTUNREACH || code == ETIMEDOUT))
+            if isServerWideFailure {
+                return .failedServerWide(message: message, isAuthError: isAuthError)
+            }
+            return .failedSingleShare
         }
     }
 
@@ -1051,8 +1105,8 @@ public final class MountManager: ObservableObject {
                 return
             }
 
-            // Accelerated polling cadence while waiting for Windows to wake up.
-            for delaySec in [5, 8, 10, 12] {
+            // Accelerated polling cadence while waiting for Windows to boot/wake up and bring SMB online.
+            for delaySec in [10, 10, 12, 15, 15] {
                 try? await Task.sleep(nanoseconds: UInt64(delaySec) * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 await self.checkAll(forceRetry: true)
