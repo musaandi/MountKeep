@@ -222,23 +222,45 @@ public enum UpdateChecker {
         return result.isEmpty ? nil : result
     }
 
-    public static func consumeWhatsNewNotes(
-        bundle: Bundle = .main,
-        defaults: UserDefaults = .standard
+    public static func currentVersionChangelog(
+        bundle: Bundle = .main
     ) -> (version: String, notes: String)? {
         let current = currentAppVersion(bundle: bundle)
-        guard current != "0.0.0" else { return nil }
-        let lastSeen = defaults.string(forKey: lastSeenVersionKey)
-        guard lastSeen != current else { return nil }
-
-        defaults.set(current, forKey: lastSeenVersionKey)
-
-        guard let url = bundle.url(forResource: "CHANGELOG", withExtension: "md"),
+        guard current != "0.0.0",
+              let url = bundle.url(forResource: "CHANGELOG", withExtension: "md"),
               let markdown = try? String(contentsOf: url, encoding: .utf8),
               let notes = extractChangelogSection(forVersion: current, from: markdown) else {
             return nil
         }
         return (current, notes)
+    }
+
+    public static func pendingWhatsNewNotes(
+        bundle: Bundle = .main,
+        defaults: UserDefaults = .standard
+    ) -> (version: String, notes: String)? {
+        guard let info = currentVersionChangelog(bundle: bundle) else { return nil }
+        let lastSeen = defaults.string(forKey: lastSeenVersionKey)
+        guard lastSeen != info.version else { return nil }
+        return info
+    }
+
+    public static func markWhatsNewSeen(
+        version: String,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(version, forKey: lastSeenVersionKey)
+    }
+
+    public static func consumeWhatsNewNotes(
+        bundle: Bundle = .main,
+        defaults: UserDefaults = .standard
+    ) -> (version: String, notes: String)? {
+        guard let info = pendingWhatsNewNotes(bundle: bundle, defaults: defaults) else {
+            return nil
+        }
+        markWhatsNewSeen(version: info.version, defaults: defaults)
+        return info
     }
 }
 

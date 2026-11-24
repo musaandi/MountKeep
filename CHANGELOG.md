@@ -2,6 +2,12 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.4] - 2026-11-23
+
+### Fixed
+- **Visible "What's New" Changelog Popup After Updating:** Deferred the post-update **What's New** window slightly after launch (`0.75s`), presented it on the active Space as a floating frontmost window (fixing macOS menu-bar `.accessory` apps opening windows silently behind other apps), and only marked the version seen once the user dismisses it.
+- **Release Notes & What's New in Settings:** Added a **Release Notes** button (when an update is available) and a **What's New** button (anytime) directly in **Settings → Network & System → Updates**.
+
 ## [1.5.3] - 2026-11-23
 
 ### Fixed

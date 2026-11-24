@@ -8,6 +8,7 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
     private var popover: NSPopover?
     private var settingsWindow: NSWindow?
     private var releaseNotesWindow: NSWindow?
+    private var pendingWhatsNewVersion: String?
     private var eventMonitor: Any?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -32,8 +33,11 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
 
         manager.start()
 
-        if let whatsNew = UpdateChecker.consumeWhatsNewNotes() {
-            openReleaseNotesWindow(mode: .whatsNew(version: whatsNew.version, notes: whatsNew.notes))
+        if let whatsNew = UpdateChecker.pendingWhatsNewNotes() {
+            // Defer slightly so WindowServer finishes activating the accessory app before presenting the window.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+                self?.openReleaseNotesWindow(mode: .whatsNew(version: whatsNew.version, notes: whatsNew.notes))
+            }
         }
     }
 
@@ -253,7 +257,14 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
             return
         }
 
-        let hostingController = NSHostingController(rootView: SettingsView(manager: manager))
+        let hostingController = NSHostingController(
+            rootView: SettingsView(
+                manager: manager,
+                onOpenReleaseNotes: { [weak self] mode in
+                    self?.openReleaseNotesWindow(mode: mode)
+                }
+            )
+        )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 650, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -274,6 +285,12 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
     public func openReleaseNotesWindow(mode: ReleaseNotesMode) {
         releaseNotesWindow?.close()
 
+        if case .whatsNew(let version, _) = mode {
+            pendingWhatsNewVersion = version
+        } else {
+            pendingWhatsNewVersion = nil
+        }
+
         let view = ReleaseNotesView(
             manager: manager,
             mode: mode,
@@ -286,7 +303,7 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
         )
         let hostingController = NSHostingController(rootView: view)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -298,17 +315,25 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
             window.title = "What's New in MountKeep v\(version)"
         }
         window.contentViewController = hostingController
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self
 
         self.releaseNotesWindow = window
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     }
 
     public func windowWillClose(_ notification: Notification) {
-        // Keep the background menu bar app running.
+        if let closedWindow = notification.object as? NSWindow,
+           closedWindow === releaseNotesWindow,
+           let version = pendingWhatsNewVersion {
+            UpdateChecker.markWhatsNewSeen(version: version)
+            pendingWhatsNewVersion = nil
+        }
     }
 
     private func quitApp() {

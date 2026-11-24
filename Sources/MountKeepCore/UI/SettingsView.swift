@@ -7,6 +7,7 @@ public enum SettingsTab: Hashable, Sendable {
 
 public struct SettingsView: View {
     @ObservedObject var manager: MountManager
+    let onOpenReleaseNotes: ((ReleaseNotesMode) -> Void)?
 
     @State private var selectedTab: SettingsTab
     @State private var quickURLText = ""
@@ -52,8 +53,13 @@ public struct SettingsView: View {
         ("10 minutes", 600)
     ]
 
-    public init(manager: MountManager, initialTab: SettingsTab = .servers) {
+    public init(
+        manager: MountManager,
+        initialTab: SettingsTab = .servers,
+        onOpenReleaseNotes: ((ReleaseNotesMode) -> Void)? = nil
+    ) {
         self.manager = manager
+        self.onOpenReleaseNotes = onOpenReleaseNotes
         self._selectedTab = State(initialValue: initialTab)
     }
 
@@ -965,11 +971,19 @@ public struct SettingsView: View {
                 }
                 Spacer()
                 if let update = manager.availableUpdate {
-                    Button("View Page") {
-                        manager.openAvailableUpdate()
+                    if let onOpenReleaseNotes {
+                        Button("Release Notes") {
+                            onOpenReleaseNotes(.updateAvailable(update))
+                        }
+                        .controlSize(.small)
+                        .disabled(manager.updateInstallProgress.isBusy)
+                    } else {
+                        Button("View Page") {
+                            manager.openAvailableUpdate()
+                        }
+                        .controlSize(.small)
+                        .disabled(manager.updateInstallProgress.isBusy)
                     }
-                    .controlSize(.small)
-                    .disabled(manager.updateInstallProgress.isBusy)
 
                     if update.canInstallInApp {
                         Button(manager.updateInstallProgress.isBusy ? "Installing…" : "Install v\(update.version)") {
@@ -979,6 +993,11 @@ public struct SettingsView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(manager.updateInstallProgress.isBusy)
                     }
+                } else if let onOpenReleaseNotes, let current = UpdateChecker.currentVersionChangelog() {
+                    Button("What's New") {
+                        onOpenReleaseNotes(.whatsNew(version: current.version, notes: current.notes))
+                    }
+                    .controlSize(.small)
                 }
                 Button(manager.isCheckingForUpdates ? "Checking…" : "Check Now") {
                     Task { await manager.checkForUpdates(manual: true) }
