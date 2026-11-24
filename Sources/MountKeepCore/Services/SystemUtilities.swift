@@ -1,5 +1,7 @@
 import Foundation
+import AppKit
 import Darwin
+import notify
 @preconcurrency import UserNotifications
 
 // MARK: - Wake-on-LAN
@@ -208,42 +210,102 @@ public enum FinderPreferences {
     private static let showAllFilesKey = "AppleShowAllFiles" as CFString
 
     private static let showAllExtensionsKey = "AppleShowAllExtensions" as CFString
+    public static let showAllExtensionsChangedNotification = Notification.Name(
+        "com.apple.LaunchServices.ShowAllExtensionsChanged"
+    )
+
+    private static let finderQueue = DispatchQueue(label: "com.mountkeep.finder-prefs", qos: .userInitiated)
+    private static var pendingRestartWorkItem: DispatchWorkItem?
 
     public static var dontWriteNetworkDSStore: Bool {
-        get { readBool(key: dsStoreKey, domain: desktopServicesDomain) }
-        set { writeBool(newValue, key: dsStoreKey, domain: desktopServicesDomain) }
+        get { readAppBool(key: dsStoreKey, domain: desktopServicesDomain) }
+        set { writeAppBool(newValue, key: dsStoreKey, domain: desktopServicesDomain) }
     }
 
     public static var showHiddenFiles: Bool {
-        get { readBool(key: showAllFilesKey, domain: finderDomain) }
+        get { readAppBool(key: showAllFilesKey, domain: finderDomain) }
         set {
-            writeBool(newValue, key: showAllFilesKey, domain: finderDomain)
-            restartFinder()
+            // Write to both com.apple.finder (Finder windows) and NSGlobalDomain (Open/Save dialogs).
+            writeAppBool(newValue, key: showAllFilesKey, domain: finderDomain)
+            writeGlobalBool(newValue, key: showAllFilesKey)
+            scheduleFinderRestart()
         }
     }
 
     public static var showFileExtensions: Bool {
-        get { readBool(key: showAllExtensionsKey, domain: kCFPreferencesAnyApplication) }
+        get { readGlobalBool(key: showAllExtensionsKey) }
         set {
+            // Write to NSGlobalDomain and clear any stale per-app override in com.apple.finder.
+            writeGlobalBool(newValue, key: showAllExtensionsKey)
             CFPreferencesSetValue(
                 showAllExtensionsKey,
-                newValue ? kCFBooleanTrue : kCFBooleanFalse,
-                kCFPreferencesAnyApplication,
+                nil,
+                finderDomain,
                 kCFPreferencesCurrentUser,
                 kCFPreferencesAnyHost
             )
             CFPreferencesSynchronize(
-                kCFPreferencesAnyApplication,
+                finderDomain,
                 kCFPreferencesCurrentUser,
                 kCFPreferencesAnyHost
             )
-            restartFinder()
+
+            // Notify LaunchServices, Finder, and running apps that global extension visibility changed.
+            notify_post(showAllExtensionsChangedNotification.rawValue)
+            DistributedNotificationCenter.default().postNotificationName(
+                showAllExtensionsChangedNotification,
+                object: nil,
+                userInfo: nil,
+                options: [.deliverImmediately]
+            )
+            scheduleFinderRestart()
         }
     }
 
-    private static func readBool(key: CFString, domain: CFString) -> Bool {
-        CFPreferencesAppSynchronize(domain)
-        let raw = CFPreferencesCopyAppValue(key, domain)
+    private static func readAppBool(key: CFString, domain: CFString) -> Bool {
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let raw = CFPreferencesCopyValue(key, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        return parseBool(raw)
+    }
+
+    private static func readGlobalBool(key: CFString) -> Bool {
+        CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let raw = CFPreferencesCopyValue(
+            key,
+            kCFPreferencesAnyApplication,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+        return parseBool(raw)
+    }
+
+    private static func writeAppBool(_ value: Bool, key: CFString, domain: CFString) {
+        CFPreferencesSetValue(
+            key,
+            value ? kCFBooleanTrue : kCFBooleanFalse,
+            domain,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+    }
+
+    private static func writeGlobalBool(_ value: Bool, key: CFString) {
+        CFPreferencesSetValue(
+            key,
+            value ? kCFBooleanTrue : kCFBooleanFalse,
+            kCFPreferencesAnyApplication,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+        CFPreferencesSynchronize(
+            kCFPreferencesAnyApplication,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+    }
+
+    private static func parseBool(_ raw: CFPropertyList?) -> Bool {
         if let value = raw as? Bool {
             return value
         }
@@ -256,13 +318,23 @@ public enum FinderPreferences {
         return false
     }
 
-    private static func writeBool(_ value: Bool, key: CFString, domain: CFString) {
-        CFPreferencesSetAppValue(key, value ? kCFBooleanTrue : kCFBooleanFalse, domain)
-        CFPreferencesAppSynchronize(domain)
+    /// Debounces and serializes Finder restarts so rapid toggles never overlap or race with cfprefsd.
+    private static func scheduleFinderRestart() {
+        finderQueue.async {
+            pendingRestartWorkItem?.cancel()
+            let item = DispatchWorkItem {
+                restartFinderSync()
+            }
+            pendingRestartWorkItem = item
+            finderQueue.asyncAfter(deadline: .now() + 0.15, execute: item)
+        }
     }
 
-    private static func restartFinder() {
-        DispatchQueue.global(qos: .utility).async {
+    private static func restartFinderSync() {
+        let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+        let oldPIDs = Set(existing.map(\.processIdentifier))
+
+        if existing.isEmpty {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
             process.arguments = ["Finder"]
@@ -270,6 +342,30 @@ public enum FinderPreferences {
             process.standardError = FileHandle.nullDevice
             try? process.run()
             process.waitUntilExit()
+            return
+        }
+
+        for app in existing {
+            _ = Darwin.kill(app.processIdentifier, SIGTERM)
+        }
+
+        // Wait up to 2s for the previous Finder instance(s) to exit cleanly.
+        let exitDeadline = Date().addingTimeInterval(2.0)
+        while Date() < exitDeadline {
+            if existing.allSatisfy(\.isTerminated) {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        // Wait briefly for launchd to respawn a fresh Finder instance before allowing another restart.
+        let respawnDeadline = Date().addingTimeInterval(1.5)
+        while Date() < respawnDeadline {
+            let current = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+            if current.contains(where: { !oldPIDs.contains($0.processIdentifier) && !$0.isTerminated }) {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
         }
     }
 }

@@ -2,6 +2,13 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.3.2] - 2026-11-23
+
+### Fixed
+- **File Extensions Toggle Reliability:** Fixed Global Domain (`NSGlobalDomain`) preference reads via `CFPreferencesCopyValue`, cleared any stale per-app Finder override, broadcast `com.apple.LaunchServices.ShowAllExtensionsChanged` (Distributed + Darwin notifications), and subscribed `MountManager` to external Finder Settings changes.
+- **Serialized Finder Restarts:** Debounced and serialized Finder restarts (`SIGTERM` + wait for old PID exit and respawn) so rapid toggle clicks no longer overlap or race with `cfprefsd`.
+- **Hidden Files in Open/Save Dialogs:** `Hidden Files` toggle now writes `AppleShowAllFiles` to both `com.apple.finder` and `NSGlobalDomain` so dotfiles on local and SMB volumes also appear in app Open/Save panels.
+
 ## [1.3.1] - 2026-11-23
 
 ### Added

@@ -69,6 +69,7 @@ public final class MountManager: ObservableObject {
     private var pendingForceRetry = false
     private var networkObserver: NetworkPathObserver?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
 
     public init(configStore: ConfigStore = ConfigStore(), logger: MountLogger = .shared) {
         self.configStore = configStore
@@ -191,6 +192,11 @@ public final class MountManager: ObservableObject {
             center.removeObserver(token)
         }
         workspaceObservers.removeAll()
+        let distCenter = DistributedNotificationCenter.default()
+        for token in distributedObservers {
+            distCenter.removeObserver(token)
+        }
+        distributedObservers.removeAll()
         logger.info("MountKeep stopped")
     }
 
@@ -237,6 +243,17 @@ public final class MountManager: ObservableObject {
         }
 
         workspaceObservers = [wakeToken, mountToken, unmountToken]
+
+        let extToken = DistributedNotificationCenter.default().addObserver(
+            forName: FinderPreferences.showAllExtensionsChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshFinderPreferences()
+            }
+        }
+        distributedObservers = [extToken]
 
         let observer = NetworkPathObserver { [weak self] satisfied in
             Task { @MainActor in
