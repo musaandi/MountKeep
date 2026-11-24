@@ -29,6 +29,10 @@ public struct SettingsView: View {
     @State private var editSSHUsername = ""
     @State private var editSSHKeyPath = ""
     @State private var showPowerSetupSheet = false
+    @State private var powerSetupHost = ""
+    @State private var powerSetupUser = ""
+    @State private var powerSetupKeyPath = ""
+    @State private var hasDefaultShutdownKey = RemotePower.hasPrivateKey()
     @State private var editError: String?
 
     // Home network pin status
@@ -74,11 +78,13 @@ public struct SettingsView: View {
             }
         }
         .frame(minWidth: 620, minHeight: 560)
-        .sheet(isPresented: $showPowerSetupSheet) {
+        .sheet(isPresented: $showPowerSetupSheet, onDismiss: {
+            hasDefaultShutdownKey = RemotePower.hasPrivateKey()
+        }) {
             RemotePowerSetupView(
-                serverHost: editHost,
-                sshUsername: editSSHUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? editUsername : editSSHUsername,
-                keyPath: editSSHKeyPath,
+                serverHost: powerSetupHost,
+                sshUsername: powerSetupUser,
+                keyPath: powerSetupKeyPath,
                 onDismiss: { showPowerSetupSheet = false }
             )
         }
@@ -361,6 +367,9 @@ public struct SettingsView: View {
                 Spacer()
 
                 Button {
+                    powerSetupHost = editHost
+                    powerSetupUser = editSSHUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? editUsername : editSSHUsername
+                    powerSetupKeyPath = editSSHKeyPath
                     showPowerSetupSheet = true
                 } label: {
                     Label("Setup Guide…", systemImage: "questionmark.circle")
@@ -554,6 +563,7 @@ public struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 homeNetworkSection
+                remotePowerSection
                 reliabilitySection
                 pollingAndStartupSection
             }
@@ -662,6 +672,102 @@ public struct SettingsView: View {
         )
     }
 
+    private var remotePowerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Remote Shut Down (SSH)")
+                        .font(.headline)
+                    Text("Adds a confirmed \"Off\" button next to online PCs. Unmounts all shares first and uses a shutdown-only SSH key.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    powerSetupHost = manager.config.servers.first?.host ?? ""
+                    powerSetupUser = manager.config.servers.first?.effectiveSSHUsername ?? ""
+                    powerSetupKeyPath = RemotePower.defaultKeyPath
+                    showPowerSetupSheet = true
+                } label: {
+                    Label("Setup Guide…", systemImage: "terminal")
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: hasDefaultShutdownKey ? "checkmark.circle.fill" : "key")
+                    .foregroundStyle(hasDefaultShutdownKey ? .green : .secondary)
+                Text(hasDefaultShutdownKey ? "Shutdown key ready:" : "SSH key not generated yet:")
+                    .font(.caption.weight(.semibold))
+                Text(RemotePower.defaultKeyPath)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(hasDefaultShutdownKey ? "Ready" : "Setup needed")
+                    .font(.caption2.weight(.medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background((hasDefaultShutdownKey ? Color.green : Color.orange).opacity(0.15))
+                    .foregroundStyle(hasDefaultShutdownKey ? .green : .orange)
+                    .clipShape(Capsule())
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.03))
+            )
+
+            if !manager.config.servers.isEmpty {
+                VStack(spacing: 5) {
+                    ForEach(manager.config.servers) { server in
+                        HStack(spacing: 8) {
+                            Toggle(isOn: Binding(
+                                get: { server.sshShutdownEnabled },
+                                set: { manager.setServerSSHShutdown(serverID: server.id, enabled: $0) }
+                            )) {
+                                HStack(spacing: 6) {
+                                    Text(server.host)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                    Text("(\(server.effectiveSSHUsername.isEmpty ? "no user" : server.effectiveSSHUsername))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+
+                            Spacer()
+
+                            Button("Guide…") {
+                                powerSetupHost = server.host
+                                powerSetupUser = server.effectiveSSHUsername
+                                powerSetupKeyPath = server.effectiveSSHKeyPath
+                                showPowerSetupSheet = true
+                            }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(0.03))
+                        )
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
     private var reliabilitySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Reliability & macOS Integration")
@@ -739,7 +845,7 @@ public struct SettingsView: View {
             )
             .font(.system(size: 12.5))
 
-            Text("Toggling hidden files or extensions restarts Finder so open windows refresh immediately.")
+            Text("Hidden files restarts Finder to refresh windows; extensions updates Finder and Spotlight live via LaunchServices.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.leading, 18)

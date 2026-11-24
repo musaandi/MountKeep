@@ -2,6 +2,14 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.1] - 2026-11-23
+
+### Fixed
+- **Live Filename Extensions Toggle (LaunchServices):** Switched `showFileExtensions` to call macOS's native LaunchServices preference API (`_LSGetShowAllExtensionsPreference` / `_LSSetShowAllExtensionsPreference`, the same API Finder Settings calls) so toggling extensions updates Finder, Spotlight (`lsd`), and running apps live without needing `killall Finder`.
+
+### Improved
+- **Remote Shut Down Discoverability:** Added a dedicated **Remote Shut Down (SSH)** section directly in **Settings → Network & System** showing SSH key status, a prominent **Setup Guide…** button, and per-server enable checkboxes.
+
 ## [1.5.0] - 2026-11-23
 
 ### Added

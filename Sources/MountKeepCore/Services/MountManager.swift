@@ -1461,6 +1461,12 @@ public final class MountManager: ObservableObject {
         Task { await checkAll(forceRetry: true) }
     }
 
+    public func setServerSSHShutdown(serverID: UUID, enabled: Bool) {
+        guard let sIdx = config.servers.firstIndex(where: { $0.id == serverID }) else { return }
+        config.servers[sIdx].sshShutdownEnabled = enabled
+        saveConfig()
+    }
+
     public func updateServer(
         serverID: UUID,
         host: String,

@@ -232,11 +232,32 @@ public enum FinderPreferences {
         }
     }
 
+    private static let launchServicesHandle: UnsafeMutableRawPointer? = dlopen(
+        "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+        RTLD_LAZY
+    )
+
+    private static let lsGetShowAllExtensions: (@convention(c) () -> Bool)? = {
+        guard let handle = launchServicesHandle,
+              let sym = dlsym(handle, "_LSGetShowAllExtensionsPreference") else { return nil }
+        return unsafeBitCast(sym, to: (@convention(c) () -> Bool).self)
+    }()
+
+    private static let lsSetShowAllExtensions: (@convention(c) (Bool) -> Void)? = {
+        guard let handle = launchServicesHandle,
+              let sym = dlsym(handle, "_LSSetShowAllExtensionsPreference") else { return nil }
+        return unsafeBitCast(sym, to: (@convention(c) (Bool) -> Void).self)
+    }()
+
     public static var showFileExtensions: Bool {
-        get { readGlobalBool(key: showAllExtensionsKey) }
+        get {
+            if let getter = lsGetShowAllExtensions {
+                return getter()
+            }
+            return readGlobalBool(key: showAllExtensionsKey)
+        }
         set {
-            // Write to NSGlobalDomain and clear any stale per-app override in com.apple.finder.
-            writeGlobalBool(newValue, key: showAllExtensionsKey)
+            // Clear any stray per-app override in com.apple.finder so LaunchServices/NSGlobalDomain is authoritative.
             CFPreferencesSetValue(
                 showAllExtensionsKey,
                 nil,
@@ -250,15 +271,21 @@ public enum FinderPreferences {
                 kCFPreferencesAnyHost
             )
 
-            // Notify LaunchServices, Finder, and running apps that global extension visibility changed.
-            notify_post(showAllExtensionsChangedNotification.rawValue)
-            DistributedNotificationCenter.default().postNotificationName(
-                showAllExtensionsChangedNotification,
-                object: nil,
-                userInfo: nil,
-                options: [.deliverImmediately]
-            )
-            scheduleFinderRestart(includeSpotlight: true)
+            if let setter = lsSetShowAllExtensions {
+                // Uses the exact LaunchServices API that Finder Settings uses — updates lsd, Finder,
+                // Spotlight, and running apps live without needing killall Finder.
+                setter(newValue)
+            } else {
+                writeGlobalBool(newValue, key: showAllExtensionsKey)
+                notify_post(showAllExtensionsChangedNotification.rawValue)
+                DistributedNotificationCenter.default().postNotificationName(
+                    showAllExtensionsChangedNotification,
+                    object: nil,
+                    userInfo: nil,
+                    options: [.deliverImmediately]
+                )
+                scheduleFinderRestart(includeSpotlight: true)
+            }
         }
     }
 
