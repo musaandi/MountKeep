@@ -16,7 +16,11 @@ public enum MountHealth: Sendable, Equatable {
 }
 
 public enum NetFSMounter {
-    private static let netfsQueue = DispatchQueue(label: "com.mountkeep.netfs", qos: .utility)
+    private static let netfsQueue = DispatchQueue(
+        label: "com.mountkeep.netfs",
+        qos: .utility,
+        attributes: .concurrent
+    )
     private static let utilityQueue = DispatchQueue(
         label: "com.mountkeep.utility",
         qos: .utility,

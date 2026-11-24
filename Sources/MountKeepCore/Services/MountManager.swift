@@ -57,6 +57,7 @@ public final class MountManager: ObservableObject {
     private var retryDates: [UUID: Date] = [:]
     private var healthFailureCounts: [UUID: Int] = [:]
     private var inFlightHealthChecks: Set<UUID> = []
+    private var inFlightMountShareIDs: Set<UUID> = []
     private var manuallyUnmountedShareIDs: Set<UUID> = []
     private var lastAutoDiscovery: [UUID: Date] = [:]
     private var lastCapacityRefreshDate: Date?
@@ -797,6 +798,7 @@ public final class MountManager: ObservableObject {
             guard !config.paused else { return }
             if hostStates[serverID] == .shuttingDown { return }
             if shareStates[share.id]?.isMounted == true { continue }
+            if inFlightMountShareIDs.contains(share.id) { continue }
             if manuallyUnmountedShareIDs.contains(share.id) {
                 shareStates[share.id] = .manuallyUnmounted
                 continue
@@ -873,6 +875,12 @@ public final class MountManager: ObservableObject {
         share: ShareConfig,
         timeout: TimeInterval
     ) async -> ShareMountStepResult {
+        guard !inFlightMountShareIDs.contains(share.id) else {
+            return .failedSingleShare
+        }
+        inFlightMountShareIDs.insert(share.id)
+        defer { inFlightMountShareIDs.remove(share.id) }
+
         shareStates[share.id] = .mounting
         logger.info("Mounting smb://\(server.username.isEmpty ? "" : "\(server.username)@")\(server.host)/\(share.name)")
 
@@ -930,7 +938,9 @@ public final class MountManager: ObservableObject {
             }
 
             let anyMountedOnServer = server.shares.contains { shareStates[$0.id]?.isMounted == true }
-            let isServerWideFailure = isAuthError || (!anyMountedOnServer && (code == EHOSTUNREACH || code == ETIMEDOUT))
+            // Only short-circuit remaining shares on auth failure or hard host-unreachable (EHOSTUNREACH).
+            // Never short-circuit on ETIMEDOUT — one wedged share/mountpoint must not block other healthy shares on the same PC.
+            let isServerWideFailure = isAuthError || (!anyMountedOnServer && code == EHOSTUNREACH)
             if isServerWideFailure {
                 return .failedServerWide(message: message, isAuthError: isAuthError)
             }
@@ -977,14 +987,16 @@ public final class MountManager: ObservableObject {
     }
 
     public func mountShare(serverID: UUID, shareID: UUID) {
-        guard let server = config.servers.first(where: { $0.id == serverID }),
+        guard !inFlightMountShareIDs.contains(shareID),
+              let server = config.servers.first(where: { $0.id == serverID }),
               let share = server.shares.first(where: { $0.id == shareID }) else { return }
 
         manuallyUnmountedShareIDs.remove(shareID)
         failureCounts[shareID] = nil
         retryDates[shareID] = nil
 
-        let timeout = TimeInterval(config.mountTimeoutSeconds)
+        let anyMounted = server.shares.contains { shareStates[$0.id]?.isMounted == true }
+        let timeout = anyMounted ? TimeInterval(config.mountTimeoutSeconds) : max(TimeInterval(config.mountTimeoutSeconds), 30.0)
         Task {
             let probe = await NetworkReachability.probeSMBHost(server.host, port: 445, timeout: 1.5)
             hostIPCache[server.id] = probe.allIPs

@@ -2,6 +2,13 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.6] - 2026-11-23
+
+### Fixed
+- **Single-Share Timeout Blocking Other Shares:** Fixed a regression from v1.5.3 where a timeout on the first share of a server (e.g. a wedged `/Volumes/<share>` mountpoint) skipped mounting all remaining healthy shares on that server. Remaining shares are now only skipped on authentication errors or `EHOSTUNREACH`.
+- **Concurrent Double-Mount Guard:** Added per-share `inFlightMountShareIDs` tracking so clicking Mount / Wake while a background poll is already mounting the same share can never start two overlapping `NetFSMountURLAsync` calls.
+- **Concurrent NetFS Callback Queue:** Switched `NetFSMounter.netfsQueue` to a concurrent queue so one slow or timed-out mount callback can never block other mounts.
+
 ## [1.5.5] - 2026-11-23
 
 ### Fixed
