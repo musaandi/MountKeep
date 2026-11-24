@@ -72,16 +72,17 @@ public struct ReleaseNotesView: View {
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(bodyMarkdown.components(separatedBy: .newlines).enumerated()), id: \.offset) { _, rawLine in
                         markdownLineView(rawLine)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(2)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 2)
             }
-            .frame(maxHeight: 240)
+            .frame(minHeight: 180, maxHeight: .infinity)
 
             if isUpdateMode, let statusMsg = manager.updateInstallProgress.message {
                 HStack(spacing: 8) {
@@ -133,7 +134,7 @@ public struct ReleaseNotesView: View {
             }
         }
         .padding(18)
-        .frame(width: 460)
+        .frame(minWidth: 480, idealWidth: 480, minHeight: 360, idealHeight: 380)
     }
 
     private var isUpdateMode: Bool {
@@ -161,10 +162,12 @@ public struct ReleaseNotesView: View {
                 Text("•")
                     .foregroundStyle(.secondary)
                 formattedText(content)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 12.5))
         } else {
             formattedText(trimmed)
+                .fixedSize(horizontal: false, vertical: true)
                 .font(.system(size: 12.5))
         }
     }

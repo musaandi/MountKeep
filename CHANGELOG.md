@@ -2,6 +2,11 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.5] - 2026-11-23
+
+### Fixed
+- **Blank Changelog Popup Body:** Fixed a SwiftUI `ScrollView` height collapse inside `ReleaseNotesView` (giving the changelog body an explicit minimum/flexible height, multi-line wrapping, and a resizable `480×380` window) so release notes and What's New bullet points render cleanly instead of collapsing between the dividers.
+
 ## [1.5.4] - 2026-11-23
 
 ### Fixed

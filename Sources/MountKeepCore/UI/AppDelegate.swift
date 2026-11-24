@@ -303,8 +303,8 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
         )
         let hostingController = NSHostingController(rootView: view)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -315,6 +315,8 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
             window.title = "What's New in MountKeep v\(version)"
         }
         window.contentViewController = hostingController
+        window.setContentSize(NSSize(width: 480, height: 380))
+        window.minSize = NSSize(width: 420, height: 320)
         window.level = .floating
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         window.center()
