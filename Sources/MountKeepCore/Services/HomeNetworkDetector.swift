@@ -217,4 +217,31 @@ public enum HomeNetworkDetector {
             gatewayMAC: gw.macAddress
         )
     }
+
+    /// Resolves the LAN MAC address for a specific IPv4 host via `/usr/sbin/arp -n <ip>`.
+    /// Only invoked on-demand when a server is online and lacks a saved Wake-on-LAN MAC.
+    public static func resolveMACAddress(forIP ip: String) -> String? {
+        let trimmed = ip.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
+        process.arguments = ["-n", trimmed]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            return ARPParser.parse(output)[trimmed]?.macAddress
+        } catch {
+            return nil
+        }
+    }
 }

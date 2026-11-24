@@ -532,13 +532,8 @@ public final class MountManager: ObservableObject {
                 wakePollTasks[serverID] = nil
 
                 // Auto-learn LAN MAC address for Wake-on-LAN if not already saved.
-                if let ip = result.primaryIP,
-                   let arp = snapshot.arpByIP[ip],
-                   let idx = config.servers.firstIndex(where: { $0.id == serverID }),
-                   config.servers[idx].macAddress == nil {
-                    config.servers[idx].macAddress = arp.macAddress
+                if learnMACIfMissing(serverID: serverID, ip: result.primaryIP, snapshot: snapshot) {
                     learnedAnyMAC = true
-                    logger.info("Learned WoL MAC for \(config.servers[idx].host) (\(ip)): \(arp.macAddress)")
                 }
             } else {
                 // If TCP :445 probe failed (e.g. Local Network privacy or transient probe drop) but a mounted
@@ -1054,6 +1049,10 @@ public final class MountManager: ObservableObject {
             return "\(server.host) is currently unreachable on port 445."
         }
 
+        if learnMACIfMissing(serverID: serverID, ip: probe.primaryIP) {
+            saveConfig()
+        }
+
         var result = await NetFSMounter.discoverShares(host: server.host, username: server.username)
         if case .failure = result, let seedShare = server.shares.first {
             _ = await NetFSMounter.mount(
@@ -1089,6 +1088,26 @@ public final class MountManager: ObservableObject {
         case .failure(let error):
             return "Scan failed (mount at least one share on \(server.host) first): \(error.localizedDescription)"
         }
+    }
+
+    /// Learns and stores a server's LAN MAC address for Wake-on-LAN if it is currently missing.
+    private func learnMACIfMissing(
+        serverID: UUID,
+        ip: String?,
+        snapshot: NetworkSnapshot? = nil
+    ) -> Bool {
+        guard let ip,
+              let idx = config.servers.firstIndex(where: { $0.id == serverID }),
+              config.servers[idx].macAddress == nil else {
+            return false
+        }
+        guard let mac = snapshot?.arpByIP[ip]?.macAddress
+            ?? HomeNetworkDetector.resolveMACAddress(forIP: ip) else {
+            return false
+        }
+        config.servers[idx].macAddress = mac
+        logger.info("Learned WoL MAC for \(config.servers[idx].host) (\(ip)): \(mac)")
+        return true
     }
 
     // MARK: - Home Network & System Preferences
