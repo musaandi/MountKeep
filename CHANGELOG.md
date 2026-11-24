@@ -2,6 +2,13 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.4.0] - 2026-11-23
+
+### Added
+- **Remote Shut Down (SSH):** Added an optional **`Off`** button next to online servers (the counterpart to Wake-on-LAN **`Wake`**) using macOS's built-in `/usr/bin/ssh` with zero external dependencies.
+- **Safe Unmount-Before-Shutdown:** Clicking **`Off`** asks for confirmation, cleanly unmounts all mounted shares on that server first (preventing Finder disconnect popups and data loss), and cancels automatically if any files are still busy.
+- **In-App SSH Setup Guide:** Added **Edit Server → Setup Guide…** with one-click dedicated shutdown key generation (`~/.ssh/mountkeep_power`) and a ready-to-copy Windows Admin PowerShell script using a restricted forced-command key (`command="shutdown /s /t 5"`).
+
 ## [1.3.2] - 2026-11-23
 
 ### Fixed

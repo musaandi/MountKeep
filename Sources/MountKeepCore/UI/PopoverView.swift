@@ -330,6 +330,10 @@ public struct PopoverView: View {
                     Text("waking…")
                         .font(.system(size: 10))
                         .foregroundStyle(.blue)
+                } else if case .shuttingDown = hostState {
+                    Text("shutting down…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
                 } else if case .awayFromHome = hostState {
                     Text("away")
                         .font(.system(size: 10))
@@ -360,9 +364,13 @@ public struct PopoverView: View {
                         .help("\(server.host) combined: \(serverCap.formattedUsedOfTotal(style: unitStyle)) (\(serverCap.usedPercentText), \(serverCap.formattedFree(style: unitStyle)))")
                 }
 
-                // Per-server Wake-on-LAN or bulk mount/unmount actions
+                // Per-server Wake-on-LAN, Remote Shut Down, or bulk mount/unmount actions
                 if !serverAway {
                     if case .waking = hostState {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.6)
+                    } else if case .shuttingDown = hostState {
                         ProgressView()
                             .controlSize(.small)
                             .scaleEffect(0.6)
@@ -384,6 +392,24 @@ public struct PopoverView: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Send Wake-on-LAN packet to \(server.host) (\(mac))")
+                    } else if hostState.isOnline && server.canRemoteShutdown {
+                        Button {
+                            confirmShutdown(server: server)
+                        } label: {
+                            HStack(spacing: 2) {
+                                Image(systemName: "power")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                Text("Off")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.red.opacity(0.13))
+                            .foregroundStyle(.red)
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Unmount all shares and shut down \(server.host) via SSH")
                     }
 
                     if hostState.isOnline && anyUnmounted {
@@ -723,10 +749,28 @@ public struct PopoverView: View {
         }
     }
 
+    private func confirmShutdown(server: ServerConfig) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Shut down \(server.host)?"
+        alert.informativeText = "MountKeep will cleanly unmount all mounted shares on \(server.host) and send a remote shutdown command via SSH. Shutdown is cancelled automatically if any files are still in use."
+        alert.addButton(withTitle: "Shut Down")
+        alert.addButton(withTitle: "Cancel")
+        if let destructive = alert.buttons.first {
+            destructive.hasDestructiveAction = true
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            manager.shutdownServer(serverID: server.id)
+        }
+    }
+
     private func hostDotColor(_ state: HostReachabilityState) -> Color {
         switch state {
         case .online: return .green
         case .waking, .checking: return .blue
+        case .shuttingDown: return .orange
         case .awayFromHome: return .secondary.opacity(0.6)
         case .offline: return .gray
         case .unknown: return .gray.opacity(0.5)

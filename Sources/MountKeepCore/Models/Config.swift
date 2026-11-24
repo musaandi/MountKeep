@@ -71,6 +71,9 @@ public struct ServerConfig: Codable, Identifiable, Equatable, Hashable, Sendable
     public var autoSyncAllShares: Bool
     public var requireHomeNetwork: Bool
     public var macAddress: String?
+    public var sshShutdownEnabled: Bool
+    public var sshUsername: String?
+    public var sshKeyPath: String?
     public var shares: [ShareConfig]
 
     public init(
@@ -80,6 +83,9 @@ public struct ServerConfig: Codable, Identifiable, Equatable, Hashable, Sendable
         autoSyncAllShares: Bool = false,
         requireHomeNetwork: Bool = true,
         macAddress: String? = nil,
+        sshShutdownEnabled: Bool = false,
+        sshUsername: String? = nil,
+        sshKeyPath: String? = nil,
         shares: [ShareConfig] = []
     ) {
         self.id = id
@@ -88,11 +94,35 @@ public struct ServerConfig: Codable, Identifiable, Equatable, Hashable, Sendable
         self.autoSyncAllShares = autoSyncAllShares
         self.requireHomeNetwork = requireHomeNetwork
         self.macAddress = macAddress.flatMap(MACAddress.normalize)
+        self.sshShutdownEnabled = sshShutdownEnabled
+        let trimmedSSHUser = sshUsername?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sshUsername = (trimmedSSHUser?.isEmpty == false) ? trimmedSSHUser : nil
+        let trimmedSSHKey = sshKeyPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sshKeyPath = (trimmedSSHKey?.isEmpty == false) ? trimmedSSHKey : nil
         self.shares = shares
     }
 
+    public var effectiveSSHUsername: String {
+        if let custom = sshUsername?.trimmingCharacters(in: .whitespacesAndNewlines), !custom.isEmpty {
+            return custom
+        }
+        return username.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public var effectiveSSHKeyPath: String {
+        if let custom = sshKeyPath?.trimmingCharacters(in: .whitespacesAndNewlines), !custom.isEmpty {
+            return custom
+        }
+        return RemotePower.defaultKeyPath
+    }
+
+    public var canRemoteShutdown: Bool {
+        sshShutdownEnabled && !effectiveSSHUsername.isEmpty
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, host, username, autoSyncAllShares, requireHomeNetwork, macAddress, shares
+        case id, host, username, autoSyncAllShares, requireHomeNetwork, macAddress
+        case sshShutdownEnabled, sshUsername, sshKeyPath, shares
     }
 
     public init(from decoder: Decoder) throws {
@@ -104,6 +134,13 @@ public struct ServerConfig: Codable, Identifiable, Equatable, Hashable, Sendable
         self.requireHomeNetwork = try container.decodeIfPresent(Bool.self, forKey: .requireHomeNetwork) ?? true
         let rawMac = try container.decodeIfPresent(String.self, forKey: .macAddress)
         self.macAddress = rawMac.flatMap(MACAddress.normalize)
+        self.sshShutdownEnabled = try container.decodeIfPresent(Bool.self, forKey: .sshShutdownEnabled) ?? false
+        let rawSSHUser = try container.decodeIfPresent(String.self, forKey: .sshUsername)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sshUsername = (rawSSHUser?.isEmpty == false) ? rawSSHUser : nil
+        let rawSSHKey = try container.decodeIfPresent(String.self, forKey: .sshKeyPath)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sshKeyPath = (rawSSHKey?.isEmpty == false) ? rawSSHKey : nil
         self.shares = try container.decodeIfPresent([ShareConfig].self, forKey: .shares) ?? []
     }
 }
@@ -217,6 +254,7 @@ public enum HostReachabilityState: Equatable, Sendable {
     case offline
     case awayFromHome
     case waking
+    case shuttingDown
 
     public var isOnline: Bool {
         if case .online = self { return true }

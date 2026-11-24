@@ -25,6 +25,10 @@ public struct SettingsView: View {
     @State private var editUsername = ""
     @State private var editMAC = ""
     @State private var editRequireHome = true
+    @State private var editSSHShutdown = false
+    @State private var editSSHUsername = ""
+    @State private var editSSHKeyPath = ""
+    @State private var showPowerSetupSheet = false
     @State private var editError: String?
 
     // Home network pin status
@@ -70,6 +74,14 @@ public struct SettingsView: View {
             }
         }
         .frame(minWidth: 620, minHeight: 560)
+        .sheet(isPresented: $showPowerSetupSheet) {
+            RemotePowerSetupView(
+                serverHost: editHost,
+                sshUsername: editSSHUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? editUsername : editSSHUsername,
+                keyPath: editSSHKeyPath,
+                onDismiss: { showPowerSetupSheet = false }
+            )
+        }
     }
 
     // MARK: - Tab 1: Servers & Shares
@@ -126,6 +138,9 @@ public struct SettingsView: View {
         editUsername = server.username
         editMAC = server.macAddress ?? ""
         editRequireHome = server.requireHomeNetwork
+        editSSHShutdown = server.sshShutdownEnabled
+        editSSHUsername = server.sshUsername ?? ""
+        editSSHKeyPath = server.sshKeyPath ?? ""
         editError = nil
     }
 
@@ -135,7 +150,10 @@ public struct SettingsView: View {
             host: editHost,
             username: editUsername,
             macAddress: editMAC,
-            requireHomeNetwork: editRequireHome
+            requireHomeNetwork: editRequireHome,
+            sshShutdownEnabled: editSSHShutdown,
+            sshUsername: editSSHUsername,
+            sshKeyPath: editSSHKeyPath
         )
         if editError == nil {
             editingServerID = nil
@@ -173,6 +191,16 @@ public struct SettingsView: View {
                                     .background(Color.secondary.opacity(0.15))
                                     .foregroundStyle(.secondary)
                                     .clipShape(Capsule())
+                            }
+                            if server.canRemoteShutdown {
+                                Text("SSH Off")
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Color.red.opacity(0.12))
+                                    .foregroundStyle(.red)
+                                    .clipShape(Capsule())
+                                    .help("Remote Shut Down enabled via SSH (\(server.effectiveSSHUsername)@\(server.host))")
                             }
                         }
 
@@ -320,6 +348,48 @@ public struct SettingsView: View {
                     .toggleStyle(.checkbox)
                     .font(.caption)
 
+                Spacer()
+            }
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Toggle("Enable Remote Shut Down (SSH)", isOn: $editSSHShutdown)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+
+                Spacer()
+
+                Button {
+                    showPowerSetupSheet = true
+                } label: {
+                    Label("Setup Guide…", systemImage: "questionmark.circle")
+                        .font(.caption)
+                }
+                .controlSize(.small)
+                .help("View step-by-step Windows OpenSSH & restricted shutdown key setup instructions")
+            }
+
+            if editSSHShutdown {
+                HStack(spacing: 8) {
+                    TextField(
+                        "SSH User (default: \(editUsername.isEmpty ? "SMB user" : editUsername))",
+                        text: $editSSHUsername
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(width: 200)
+
+                    TextField(
+                        "SSH Key (default: \(RemotePower.defaultKeyPath))",
+                        text: $editSSHKeyPath
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                }
+            }
+
+            HStack(spacing: 10) {
                 Spacer()
 
                 Button("Cancel") {

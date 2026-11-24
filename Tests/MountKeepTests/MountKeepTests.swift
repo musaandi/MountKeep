@@ -408,4 +408,45 @@ final class MountKeepTests: XCTestCase {
         """.data(using: .utf8)!
         XCTAssertNil(UpdateChecker.parseLatestRelease(from: draftJSON))
     }
+
+    func testRemotePowerSSHArgumentsAndSetupScript() throws {
+        let server = ServerConfig(
+            host: "workstation",
+            username: "alice",
+            sshShutdownEnabled: true
+        )
+        XCTAssertTrue(server.canRemoteShutdown)
+        XCTAssertEqual(server.effectiveSSHUsername, "alice")
+        XCTAssertEqual(server.effectiveSSHKeyPath, RemotePower.defaultKeyPath)
+
+        let args = RemotePower.buildSSHArguments(
+            host: server.host,
+            username: server.effectiveSSHUsername,
+            keyPath: "/tmp/test_key"
+        )
+        XCTAssertEqual(args[0], "-i")
+        XCTAssertEqual(args[1], "/tmp/test_key")
+        XCTAssertTrue(args.contains("BatchMode=yes"))
+        XCTAssertTrue(args.contains("alice@workstation"))
+        XCTAssertEqual(args.last, "shutdown /s /t 5")
+
+        let pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey mountkeep-power"
+        let restricted = RemotePower.restrictedAuthorizedKeyLine(publicKey: pub)
+        XCTAssertTrue(restricted.hasPrefix(#"command="shutdown /s /t 5",no-port-forwarding"#))
+        XCTAssertTrue(restricted.hasSuffix(pub))
+
+        let script = RemotePower.windowsSetupScript(publicKey: pub)
+        XCTAssertTrue(script.contains("OpenSSH.Server"))
+        XCTAssertTrue(script.contains("administrators_authorized_keys"))
+        XCTAssertTrue(script.contains("icacls.exe"))
+        XCTAssertTrue(script.contains(pub))
+
+        // Backward compatibility: older ServerConfig JSON without SSH keys decodes cleanly.
+        let legacyJSON = #"{"host":"nas","username":"bob","shares":[]}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(ServerConfig.self, from: legacyJSON)
+        XCTAssertFalse(decoded.sshShutdownEnabled)
+        XCTAssertFalse(decoded.canRemoteShutdown)
+        XCTAssertNil(decoded.sshUsername)
+        XCTAssertNil(decoded.sshKeyPath)
+    }
 }

@@ -65,6 +65,7 @@ public final class MountManager: ObservableObject {
     private var debouncedCheckTask: Task<Void, Never>?
     private var awayCleanupTask: Task<Void, Never>?
     private var wakePollTasks: [UUID: Task<Void, Never>] = [:]
+    private var shutdownPollTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingRecheck = false
     private var pendingForceRetry = false
     private var networkObserver: NetworkPathObserver?
@@ -185,6 +186,8 @@ public final class MountManager: ObservableObject {
         awayCleanupTask?.cancel()
         for (_, task) in wakePollTasks { task.cancel() }
         wakePollTasks.removeAll()
+        for (_, task) in shutdownPollTasks { task.cancel() }
+        shutdownPollTasks.removeAll()
         networkObserver?.stop()
         networkObserver = nil
         let center = NSWorkspace.shared.notificationCenter
@@ -553,9 +556,11 @@ public final class MountManager: ObservableObject {
             reachableByServer[serverID] = result.isReachable
 
             if result.isReachable {
-                hostStates[serverID] = .online(ipAddress: result.primaryIP)
-                wakePollTasks[serverID]?.cancel()
-                wakePollTasks[serverID] = nil
+                if hostStates[serverID] != .shuttingDown {
+                    hostStates[serverID] = .online(ipAddress: result.primaryIP)
+                    wakePollTasks[serverID]?.cancel()
+                    wakePollTasks[serverID] = nil
+                }
 
                 // Auto-learn LAN MAC address for Wake-on-LAN if not already saved.
                 if learnMACIfMissing(serverID: serverID, ip: result.primaryIP, snapshot: snapshot) {
@@ -565,7 +570,8 @@ public final class MountManager: ObservableObject {
                 // If TCP :445 probe failed (e.g. Local Network privacy or transient probe drop) but a mounted
                 // share on this server passes a live health probe, the host is demonstrably online.
                 var verifiedOnlineViaMount = false
-                if let srv = config.servers.first(where: { $0.id == serverID }),
+                if hostStates[serverID] != .shuttingDown,
+                   let srv = config.servers.first(where: { $0.id == serverID }),
                    let mountedPoint = srv.shares.compactMap({ shareStates[$0.id]?.mountPoint }).first {
                     let health = await NetFSMounter.checkMountHealth(mountPoint: mountedPoint, timeout: 2.0)
                     if health == .healthy {
@@ -580,6 +586,8 @@ public final class MountManager: ObservableObject {
                     wakePollTasks[serverID] = nil
                 } else if hostStates[serverID] != .waking {
                     hostStates[serverID] = .offline
+                    shutdownPollTasks[serverID]?.cancel()
+                    shutdownPollTasks[serverID] = nil
                 }
             }
         }
@@ -614,6 +622,9 @@ public final class MountManager: ObservableObject {
         // 5. Mount per-server sequentially, with different servers running concurrently.
         await withTaskGroup(of: Void.self) { group in
             for server in eligibleServers {
+                if hostStates[server.id] == .shuttingDown {
+                    continue
+                }
                 let isOnline = reachableByServer[server.id] ?? false
                 if !isOnline {
                     for share in server.shares where share.enabled {
@@ -1012,6 +1023,8 @@ public final class MountManager: ObservableObject {
             return
         }
 
+        shutdownPollTasks[serverID]?.cancel()
+        shutdownPollTasks[serverID] = nil
         hostStates[serverID] = .waking
         for share in server.shares {
             failureCounts[share.id] = nil
@@ -1045,6 +1058,95 @@ public final class MountManager: ObservableObject {
             if self.hostStates[serverID] == .waking {
                 self.hostStates[serverID] = .offline
             }
+        }
+    }
+
+    /// Cleanly unmounts all shares on `serverID` and sends a remote shutdown command over SSH.
+    /// Aborts if any mounted share is busy and refuses to unmount.
+    public func shutdownServer(serverID: UUID) {
+        guard let server = config.servers.first(where: { $0.id == serverID }),
+              server.canRemoteShutdown else {
+            statusBanner = "Remote shutdown is not configured for this server."
+            return
+        }
+
+        wakePollTasks[serverID]?.cancel()
+        wakePollTasks[serverID] = nil
+        shutdownPollTasks[serverID]?.cancel()
+
+        hostStates[serverID] = .shuttingDown
+        statusBanner = nil
+
+        shutdownPollTasks[serverID] = Task { [weak self] in
+            guard let self else { return }
+
+            // 1. Cleanly unmount all mounted shares on this server first so open files aren't interrupted
+            // and macOS doesn't display the "Server Disconnected" dialog.
+            let mountedTargets: [(ShareConfig, String)] = server.shares.compactMap { share in
+                guard let mp = self.shareStates[share.id]?.mountPoint else { return nil }
+                return (share, mp)
+            }
+
+            var busyShares: [String] = []
+            for (share, mountPoint) in mountedTargets {
+                let unmountResult = await NetFSMounter.unmount(mountPoint: mountPoint)
+                switch unmountResult {
+                case .success:
+                    self.shareStates[share.id] = .unmounted
+                    self.logger.info("Unmounted \(mountPoint) before shutting down \(server.host)")
+                case .failure(let err):
+                    self.logger.warn("Aborting shutdown of \(server.host) — could not unmount \(mountPoint): \(err.localizedDescription)")
+                    busyShares.append(share.name)
+                }
+            }
+
+            self.refreshMountedSnapshotOnly()
+
+            if !busyShares.isEmpty {
+                self.statusBanner = "Shutdown cancelled for \(server.host): \(busyShares.joined(separator: ", ")) still in use."
+                self.hostStates[serverID] = .unknown
+                await self.checkAll(forceRetry: false)
+                return
+            }
+
+            // 2. Send remote shutdown command via SSH.
+            let sshResult = await RemotePower.shutdown(
+                host: server.host,
+                username: server.effectiveSSHUsername,
+                keyPath: server.effectiveSSHKeyPath
+            )
+
+            switch sshResult {
+            case .success:
+                self.logger.info("Sent remote shutdown command to \(server.host) via SSH (\(server.effectiveSSHUsername)@\(server.host))")
+            case .failure(let err):
+                self.logger.warn("Remote shutdown failed for \(server.host): \(err.localizedDescription)")
+                self.statusBanner = "Shutdown failed for \(server.host): \(err.localizedDescription)"
+                self.hostStates[serverID] = .unknown
+                await self.checkAll(forceRetry: false)
+                return
+            }
+
+            // 3. Poll briefly until the PC drops off TCP :445 so the UI transitions cleanly to Offline.
+            for _ in 0..<10 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled else { return }
+                let probe = await NetworkReachability.probeSMBHost(server.host, port: 445, timeout: 1.5)
+                if !probe.isReachable {
+                    self.hostStates[serverID] = .offline
+                    for share in server.shares where share.enabled {
+                        if self.shareStates[share.id]?.isMounted != true && !self.manuallyUnmountedShareIDs.contains(share.id) {
+                            self.shareStates[share.id] = .hostOffline
+                        }
+                    }
+                    self.recomputePollTimer()
+                    return
+                }
+            }
+
+            // Still reachable after 30s — refresh actual state instead of sticking in shuttingDown.
+            self.hostStates[serverID] = .unknown
+            await self.checkAll(forceRetry: false)
         }
     }
 
@@ -1331,7 +1433,10 @@ public final class MountManager: ObservableObject {
         host: String,
         username: String,
         macAddress: String,
-        requireHomeNetwork: Bool
+        requireHomeNetwork: Bool,
+        sshShutdownEnabled: Bool? = nil,
+        sshUsername: String? = nil,
+        sshKeyPath: String? = nil
     ) -> String? {
         let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanHost.isEmpty else { return "Hostname cannot be empty." }
@@ -1352,6 +1457,17 @@ public final class MountManager: ObservableObject {
         config.servers[sIdx].username = username.trimmingCharacters(in: .whitespacesAndNewlines)
         config.servers[sIdx].macAddress = normalizedMac
         config.servers[sIdx].requireHomeNetwork = requireHomeNetwork
+        if let sshShutdownEnabled {
+            config.servers[sIdx].sshShutdownEnabled = sshShutdownEnabled
+        }
+        if let sshUsername {
+            let trimmed = sshUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+            config.servers[sIdx].sshUsername = trimmed.isEmpty ? nil : trimmed
+        }
+        if let sshKeyPath {
+            let trimmed = sshKeyPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            config.servers[sIdx].sshKeyPath = trimmed.isEmpty ? nil : trimmed
+        }
         saveConfig()
         clearBackoffs()
         Task { await checkAll(forceRetry: true) }

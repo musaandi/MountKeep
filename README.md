@@ -178,7 +178,24 @@ Settings are stored as human-editable JSON at `~/Library/Application Support/Mou
 | [`NetworkReachability`](Sources/MountKeepCore/Services/NetworkReachability.swift) | Non-blocking BSD socket `:445` TCP probe + `NWPathMonitor` network transition observer |
 | [`SystemUtilities`](Sources/MountKeepCore/Services/SystemUtilities.swift) | Wake-on-LAN UDP magic packet broadcaster (`getifaddrs`), throttled `UNUserNotificationCenter` auth notifier, and Finder `DSDontWriteNetworkStores` preference |
 | [`LaunchAgentManager`](Sources/MountKeepCore/Services/LaunchAgentManager.swift) | Native `SMAppService.mainApp` Login Item registration with automatic legacy plist cleanup |
+| [`RemotePower`](Sources/MountKeepCore/Services/RemotePower.swift) | Zero-dependency SSH remote power-off using forced-command Ed25519 shutdown keys and pre-unmount safety |
+| [`UpdateChecker`](Sources/MountKeepCore/Services/UpdateChecker.swift) | GitHub Releases API update checks and bundled `CHANGELOG.md` What's New parser |
 | [`MountManager`](Sources/MountKeepCore/Services/MountManager.swift) | `@MainActor` orchestrator tying wake/network/unmount events, adaptive polling, backoff, stale cleanup, and zombie healing together |
+
+---
+
+## Remote Shut Down (Optional, via SSH)
+
+In addition to Wake-on-LAN (`Wake` when offline), MountKeep can safely shut down an online Windows PC (`Off` button with confirmation):
+
+1. Open **Settings → Servers & Shares**, click the pencil (**Edit**) icon on a server, and click **Setup Guide…**.
+2. Click **Generate Shutdown Key** to create a dedicated Ed25519 key at `~/.ssh/mountkeep_power`.
+3. Click **Copy PowerShell** and run the script once in **PowerShell as Administrator** on the Windows PC. It enables Windows' built-in OpenSSH Server and installs the key in `C:\ProgramData\ssh\administrators_authorized_keys` prefixed with:
+   ```text
+   command="shutdown /s /t 5",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty
+   ```
+   Because of the forced-command restriction, the key **cannot open a shell or run any other command**—it can only trigger a 5-second graceful shutdown.
+4. Check **Enable Remote Shut Down (SSH)** and click **Save**. When triggered, MountKeep cleanly unmounts all mounted shares on that server first and cancels shutdown automatically if any files are busy.
 
 ---
 
