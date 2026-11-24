@@ -275,6 +275,7 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
         releaseNotesWindow?.close()
 
         let view = ReleaseNotesView(
+            manager: manager,
             mode: mode,
             onOpenGitHub: { url in
                 NSWorkspace.shared.open(url)

@@ -627,7 +627,7 @@ public struct PopoverView: View {
             ) {
                 manager.setShowFileExtensions(!manager.showFileExtensions)
             }
-            .help("Toggle all filename extensions in Finder (AppleShowAllExtensions)")
+            .help("Force-show all filename extensions system-wide (Finder & Spotlight) even on items marked 'Hide extension'")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)

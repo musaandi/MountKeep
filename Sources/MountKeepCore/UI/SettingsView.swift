@@ -785,17 +785,26 @@ public struct SettingsView: View {
                 }
                 Spacer()
                 if let update = manager.availableUpdate {
-                    Button("Open v\(update.version)") {
+                    Button("View Page") {
                         manager.openAvailableUpdate()
                     }
                     .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
+                    .disabled(manager.updateInstallProgress.isBusy)
+
+                    if update.canInstallInApp {
+                        Button(manager.updateInstallProgress.isBusy ? "Installing…" : "Install v\(update.version)") {
+                            manager.installAvailableUpdate()
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(manager.updateInstallProgress.isBusy)
+                    }
                 }
                 Button(manager.isCheckingForUpdates ? "Checking…" : "Check Now") {
                     Task { await manager.checkForUpdates(manual: true) }
                 }
                 .controlSize(.small)
-                .disabled(manager.isCheckingForUpdates)
+                .disabled(manager.isCheckingForUpdates || manager.updateInstallProgress.isBusy)
             }
         }
         .padding(12)

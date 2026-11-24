@@ -45,6 +45,7 @@ public final class MountManager: ObservableObject {
     @Published public private(set) var availableUpdate: AppReleaseInfo?
     @Published public private(set) var isCheckingForUpdates: Bool = false
     @Published public private(set) var updateCheckStatus: String?
+    @Published public private(set) var updateInstallProgress: UpdateInstallProgress = .idle
 
     public let configStore: ConfigStore
     private let logger: MountLogger
@@ -1355,6 +1356,38 @@ public final class MountManager: ObservableObject {
     public func openAvailableUpdate() {
         guard let url = availableUpdate?.releaseURL else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    public func installAvailableUpdate() {
+        guard let release = availableUpdate, !updateInstallProgress.isBusy else { return }
+        updateInstallProgress = .downloading("Starting update to v\(release.version)…")
+        updateCheckStatus = "Downloading v\(release.version)…"
+
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await AppUpdater.install(release: release) { [weak self] progress in
+                Task { @MainActor in
+                    self?.updateInstallProgress = progress
+                    if let msg = progress.message {
+                        self?.updateCheckStatus = msg
+                    }
+                }
+            }
+
+            switch result {
+            case .success(.terminateForSwap):
+                self.logger.info("Staged MountKeep v\(release.version); terminating to complete swap and relaunch")
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                NSApp.terminate(nil)
+            case .success(.runningExternalInstaller):
+                self.logger.info("Running source installer for MountKeep v\(release.version)")
+            case .failure(let error):
+                let message = error.localizedDescription
+                self.logger.warn("In-app update failed: \(message)")
+                self.updateInstallProgress = .failed(message)
+                self.updateCheckStatus = "Install failed: \(message)"
+            }
+        }
     }
 
     public func setStorageUnitStyle(_ style: StorageUnitStyle) {

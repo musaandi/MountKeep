@@ -368,10 +368,17 @@ final class MountKeepTests: XCTestCase {
         {
           "tag_name": "v1.3.0",
           "html_url": "https://github.com/musaandi/MountKeep/releases/tag/v1.3.0",
+          "tarball_url": "https://api.github.com/repos/musaandi/MountKeep/tarball/v1.3.0",
           "body": "### Added\\n- Finder quick toggles",
           "published_at": "2026-11-23T20:00:00Z",
           "draft": false,
-          "prerelease": false
+          "prerelease": false,
+          "assets": [
+            {
+              "name": "MountKeep-v1.3.0.zip",
+              "browser_download_url": "https://github.com/musaandi/MountKeep/releases/download/v1.3.0/MountKeep-v1.3.0.zip"
+            }
+          ]
         }
         """.data(using: .utf8)!
 
@@ -380,6 +387,10 @@ final class MountKeepTests: XCTestCase {
         XCTAssertEqual(parsed?.tagName, "v1.3.0")
         XCTAssertEqual(parsed?.releaseNotes, "### Added\n- Finder quick toggles")
         XCTAssertEqual(parsed?.releaseURL.absoluteString, "https://github.com/musaandi/MountKeep/releases/tag/v1.3.0")
+        XCTAssertEqual(parsed?.assetName, "MountKeep-v1.3.0.zip")
+        XCTAssertEqual(parsed?.assetDownloadURL?.absoluteString, "https://github.com/musaandi/MountKeep/releases/download/v1.3.0/MountKeep-v1.3.0.zip")
+        XCTAssertEqual(parsed?.sourceTarballURL?.absoluteString, "https://api.github.com/repos/musaandi/MountKeep/tarball/v1.3.0")
+        XCTAssertTrue(parsed?.canInstallInApp == true)
 
         let changelog = """
         # Changelog

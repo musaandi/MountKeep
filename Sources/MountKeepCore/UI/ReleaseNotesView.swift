@@ -6,15 +6,18 @@ public enum ReleaseNotesMode: Equatable {
 }
 
 public struct ReleaseNotesView: View {
+    @ObservedObject var manager: MountManager
     let mode: ReleaseNotesMode
     let onOpenGitHub: (URL) -> Void
     let onDismiss: () -> Void
 
     public init(
+        manager: MountManager,
         mode: ReleaseNotesMode,
         onOpenGitHub: @escaping (URL) -> Void,
         onDismiss: @escaping () -> Void
     ) {
+        self.manager = manager
         self.mode = mode
         self.onOpenGitHub = onOpenGitHub
         self.onDismiss = onDismiss
@@ -31,8 +34,11 @@ public struct ReleaseNotesView: View {
 
     private var subtitleText: String {
         switch mode {
-        case .updateAvailable:
-            return "A newer release is published on GitHub."
+        case .updateAvailable(let release):
+            if release.assetDownloadURL != nil {
+                return "Ready to install directly or view on GitHub."
+            }
+            return "Install from source or view release details on GitHub."
         case .whatsNew:
             return "Updated and running on this Mac."
         }
@@ -77,20 +83,49 @@ public struct ReleaseNotesView: View {
             }
             .frame(maxHeight: 240)
 
+            if isUpdateMode, let statusMsg = manager.updateInstallProgress.message {
+                HStack(spacing: 8) {
+                    if manager.updateInstallProgress.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.75)
+                    } else if case .failed = manager.updateInstallProgress {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                    }
+                    Text(statusMsg)
+                        .font(.caption)
+                        .foregroundStyle(isInstallFailed ? .red : .secondary)
+                        .lineLimit(2)
+                }
+            }
+
             Divider()
 
-            HStack {
-                Spacer()
+            HStack(spacing: 8) {
                 if case .updateAvailable(let release) = mode {
+                    Button("View on GitHub") {
+                        onOpenGitHub(release.releaseURL)
+                    }
+                    .disabled(manager.updateInstallProgress.isBusy)
+
+                    Spacer()
+
                     Button("Later", action: onDismiss)
                         .keyboardShortcut(.cancelAction)
-                    Button("Open on GitHub") {
-                        onOpenGitHub(release.releaseURL)
-                        onDismiss()
+                        .disabled(manager.updateInstallProgress.isBusy)
+
+                    if release.canInstallInApp {
+                        Button(manager.updateInstallProgress.isBusy ? "Installing…" : "Install Update") {
+                            manager.installAvailableUpdate()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(manager.updateInstallProgress.isBusy)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
                 } else {
+                    Spacer()
                     Button("Done", action: onDismiss)
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
@@ -98,11 +133,16 @@ public struct ReleaseNotesView: View {
             }
         }
         .padding(18)
-        .frame(width: 440)
+        .frame(width: 460)
     }
 
     private var isUpdateMode: Bool {
         if case .updateAvailable = mode { return true }
+        return false
+    }
+
+    private var isInstallFailed: Bool {
+        if case .failed = manager.updateInstallProgress { return true }
         return false
     }
 

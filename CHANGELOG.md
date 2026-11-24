@@ -2,6 +2,15 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.0] - 2026-11-23
+
+### Added
+- **Hybrid 1-Click In-App Updater:** Update prompts in both the release notes window and **Settings → Network & System** now offer **View on GitHub / View Page** *and* **Install Update**. Downloads prebuilt `.app.zip` GitHub Release assets (fast swap + automatic local dev-cert re-sign when available + relaunch) with a source tarball build fallback if no zip asset is attached.
+- **Release Packaging Script:** Added `scripts/package-release.sh` to produce ad-hoc signed `MountKeep-vX.Y.Z.zip` release archives with no personal certificate metadata.
+
+### Fixed
+- **Spotlight Extension Refresh:** Toggling `Extensions` now also restarts Spotlight (`com.apple.Spotlight`) alongside Finder so toggling global extensions back off clears `.app` suffixes in Spotlight immediately.
+
 ## [1.4.0] - 2026-11-23
 
 ### Added

@@ -258,7 +258,7 @@ public enum FinderPreferences {
                 userInfo: nil,
                 options: [.deliverImmediately]
             )
-            scheduleFinderRestart()
+            scheduleFinderRestart(includeSpotlight: true)
         }
     }
 
@@ -318,19 +318,25 @@ public enum FinderPreferences {
         return false
     }
 
-    /// Debounces and serializes Finder restarts so rapid toggles never overlap or race with cfprefsd.
-    private static func scheduleFinderRestart() {
+    /// Debounces and serializes Finder (and optionally Spotlight) restarts so rapid toggles never overlap or race with cfprefsd.
+    private static func scheduleFinderRestart(includeSpotlight: Bool = false) {
         finderQueue.async {
             pendingRestartWorkItem?.cancel()
             let item = DispatchWorkItem {
-                restartFinderSync()
+                restartFinderSync(includeSpotlight: includeSpotlight)
             }
             pendingRestartWorkItem = item
             finderQueue.asyncAfter(deadline: .now() + 0.15, execute: item)
         }
     }
 
-    private static func restartFinderSync() {
+    private static func restartFinderSync(includeSpotlight: Bool) {
+        if includeSpotlight {
+            for spotlight in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Spotlight") {
+                _ = Darwin.kill(spotlight.processIdentifier, SIGTERM)
+            }
+        }
+
         let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
         let oldPIDs = Set(existing.map(\.processIdentifier))
 
