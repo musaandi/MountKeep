@@ -1073,6 +1073,12 @@ public struct SettingsView: View {
 
                 Spacer()
 
+                Button("Reset NetAuth") {
+                    manager.restartNetAuthAgentNow()
+                }
+                .controlSize(.small)
+                .help("Restart macOS's NetAuthSysAgent daemon if SMB mounts become stuck")
+
                 Button("Open config.json") {
                     manager.openConfigFile()
                 }

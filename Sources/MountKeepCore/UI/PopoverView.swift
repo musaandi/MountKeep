@@ -378,12 +378,10 @@ public struct PopoverView: View {
                 if !serverAway {
                     if case .waking = hostState {
                         ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.6)
+                            .controlSize(.mini)
                     } else if case .shuttingDown = hostState {
                         ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.6)
+                            .controlSize(.mini)
                     } else if case .offline = hostState, let mac = server.macAddress {
                         Button {
                             manager.wakeServer(serverID: server.id)
@@ -504,12 +502,10 @@ public struct PopoverView: View {
                     .help("Unmount (pauses auto-mount for this share)")
                 } else if case .mounting = state {
                     ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.65)
+                        .controlSize(.mini)
                 } else if case .healing = state {
                     ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.65)
+                        .controlSize(.mini)
                 } else if !serverAway {
                     Button {
                         manager.mountShare(serverID: server.id, shareID: share.id)

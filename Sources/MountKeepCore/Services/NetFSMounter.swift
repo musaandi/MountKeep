@@ -135,6 +135,30 @@ public enum NetFSMounter {
         }
     }
 
+    /// Force-kills the current user's wedged `NetAuthSysAgent` daemon so `launchd` respawns a clean
+    /// instance on the next `NetFSMountURLAsync` call (recovers from macOS DCERPC / Mach port deadlock).
+    @discardableResult
+    public static func restartNetAuthSysAgent() async -> Bool {
+        await withCheckedContinuation { continuation in
+            utilityQueue.async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+                process.arguments = ["-9", "NetAuthSysAgent"]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    // Brief pause for launchd to reap the deadlocked PID before new NetFS IPC.
+                    Thread.sleep(forTimeInterval: 0.4)
+                    continuation.resume(returning: process.terminationStatus == 0)
+                } catch {
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
     /// Cleanly unmounts a mounted volume using `NSWorkspace`.
     public static func unmount(mountPoint: String) async -> Result<Void, Error> {
         await withCheckedContinuation { continuation in

@@ -58,6 +58,9 @@ public final class MountManager: ObservableObject {
     private var healthFailureCounts: [UUID: Int] = [:]
     private var inFlightHealthChecks: Set<UUID> = []
     private var inFlightMountShareIDs: Set<UUID> = []
+    private var inFlightMountServerIDs: Set<UUID> = []
+    private var consecutiveNetFSTimeouts: Int = 0
+    private var lastNetAuthRecoveryDate: Date?
     private var manuallyUnmountedShareIDs: Set<UUID> = []
     private var lastAutoDiscovery: [UUID: Date] = [:]
     private var lastCapacityRefreshDate: Date?
@@ -792,7 +795,10 @@ public final class MountManager: ObservableObject {
     }
 
     private func reconcileOnlineServer(serverID: UUID, forceRetry: Bool, timeout: TimeInterval) async {
-        guard let server = config.servers.first(where: { $0.id == serverID }) else { return }
+        guard !inFlightMountServerIDs.contains(serverID),
+              let server = config.servers.first(where: { $0.id == serverID }) else { return }
+        inFlightMountServerIDs.insert(serverID)
+        defer { inFlightMountServerIDs.remove(serverID) }
 
         for share in server.shares where share.enabled {
             guard !config.paused else { return }
@@ -807,15 +813,16 @@ public final class MountManager: ObservableObject {
                 continue
             }
 
-            // Cold SMB sessions (first share mounted on a server, e.g. waking spun-down archive drives
-            // over Wi-Fi) frequently take 16-25s; guarantee at least 30s on the initial share.
+            // Cold SMB sessions (first share mounted on a newly woken/online server) can take 20-35s.
+            // Giving the initial share at least 45s avoids premature NetFSMountURLCancel calls that can
+            // leak stuck DCERPC threads inside macOS's NetAuthSysAgent.
             let anyMountedOnServer = server.shares.contains { shareStates[$0.id]?.isMounted == true }
-            let effectiveTimeout = anyMountedOnServer ? timeout : max(timeout, 30.0)
+            let effectiveTimeout = anyMountedOnServer ? timeout : max(timeout, 45.0)
 
             let step = await mountSingleShareInternal(server: server, share: share, timeout: effectiveTimeout)
             if case .failedServerWide(let message, let isAuthError) = step {
-                // Short-circuit remaining unmounted shares on this server so we don't loop 5x30s when
-                // the server/session is unreachable, wedged, or failing Keychain auth.
+                // Short-circuit remaining unmounted shares on this server so we don't trigger cascading
+                // NetFSMountURLCancel calls or orphan /Volumes/<Share> directories.
                 let retryAt = retryDates[share.id]
                 for remaining in server.shares where remaining.enabled && remaining.id != share.id {
                     guard shareStates[remaining.id]?.isMounted != true,
@@ -893,6 +900,7 @@ public final class MountManager: ObservableObject {
 
         switch outcome {
         case .mounted(let mountPoint):
+            consecutiveNetFSTimeouts = 0
             failureCounts[share.id] = nil
             retryDates[share.id] = nil
             healthFailureCounts[share.id] = nil
@@ -913,6 +921,7 @@ public final class MountManager: ObservableObject {
                     configuredShareName: share.name
                 )
             }) {
+                consecutiveNetFSTimeouts = 0
                 failureCounts[share.id] = nil
                 retryDates[share.id] = nil
                 shareStates[share.id] = .mounted(mountPoint: existing.mountPoint)
@@ -937,14 +946,57 @@ public final class MountManager: ObservableObject {
                 )
             }
 
+            if code == ETIMEDOUT {
+                consecutiveNetFSTimeouts += 1
+                await recoverNetAuthSysAgentIfWedged(forServer: server)
+            }
+
             let anyMountedOnServer = server.shares.contains { shareStates[$0.id]?.isMounted == true }
-            // Only short-circuit remaining shares on auth failure or hard host-unreachable (EHOSTUNREACH).
-            // Never short-circuit on ETIMEDOUT — one wedged share/mountpoint must not block other healthy shares on the same PC.
-            let isServerWideFailure = isAuthError || (!anyMountedOnServer && code == EHOSTUNREACH)
+            // Short-circuit remaining shares on auth failure, EHOSTUNREACH, or a cold 45s ETIMEDOUT
+            // when zero shares are mounted yet (avoids cascading NetFSMountURLCancel calls that can
+            // wedge NetAuthSysAgent or create orphan /Volumes/<Share> stubs).
+            let isServerWideFailure = isAuthError || (!anyMountedOnServer && (code == EHOSTUNREACH || code == ETIMEDOUT))
             if isServerWideFailure {
                 return .failedServerWide(message: message, isAuthError: isAuthError)
             }
             return .failedSingleShare
+        }
+    }
+
+    /// Detects a deadlocked macOS `NetAuthSysAgent` (TCP :445 reachable while NetFS times out twice)
+    /// and restarts the user's `NetAuthSysAgent` daemon (throttled to at most once every 10 minutes).
+    private func recoverNetAuthSysAgentIfWedged(forServer server: ServerConfig) async {
+        guard consecutiveNetFSTimeouts >= 2 else { return }
+        if let last = lastNetAuthRecoveryDate, Date().timeIntervalSince(last) < 600 {
+            return
+        }
+        // Only act if no other share is actively mounting right now.
+        let otherInFlight = inFlightMountShareIDs.count > 1
+        guard !otherInFlight else { return }
+
+        // Confirm the SMB server is genuinely alive right now on TCP :445.
+        let liveProbe = await NetworkReachability.probeSMBHost(server.host, port: 445, timeout: 1.5)
+        guard liveProbe.isReachable else { return }
+
+        lastNetAuthRecoveryDate = Date()
+        consecutiveNetFSTimeouts = 0
+        logger.warn("Detected unresponsive macOS NetAuthSysAgent (TCP :445 reachable on \(server.host) while NetFS timed out twice) — restarting NetAuthSysAgent to recover")
+        let restarted = await NetFSMounter.restartNetAuthSysAgent()
+        if restarted {
+            statusBanner = "Restarted unresponsive macOS NetAuthSysAgent — retrying mounts…"
+            clearBackoffs()
+            scheduleDebouncedCheck(delay: 1.5, forceRetry: true)
+        }
+    }
+
+    public func restartNetAuthAgentNow() {
+        Task {
+            logger.info("User triggered manual NetAuthSysAgent restart")
+            _ = await NetFSMounter.restartNetAuthSysAgent()
+            consecutiveNetFSTimeouts = 0
+            statusBanner = "Restarted macOS NetAuthSysAgent — re-checking mounts…"
+            clearBackoffs()
+            await checkAll(forceRetry: true)
         }
     }
 
@@ -988,6 +1040,7 @@ public final class MountManager: ObservableObject {
 
     public func mountShare(serverID: UUID, shareID: UUID) {
         guard !inFlightMountShareIDs.contains(shareID),
+              !inFlightMountServerIDs.contains(serverID),
               let server = config.servers.first(where: { $0.id == serverID }),
               let share = server.shares.first(where: { $0.id == shareID }) else { return }
 
@@ -996,8 +1049,12 @@ public final class MountManager: ObservableObject {
         retryDates[shareID] = nil
 
         let anyMounted = server.shares.contains { shareStates[$0.id]?.isMounted == true }
-        let timeout = anyMounted ? TimeInterval(config.mountTimeoutSeconds) : max(TimeInterval(config.mountTimeoutSeconds), 30.0)
+        let timeout = anyMounted ? TimeInterval(config.mountTimeoutSeconds) : max(TimeInterval(config.mountTimeoutSeconds), 45.0)
         Task {
+            guard !inFlightMountServerIDs.contains(serverID) else { return }
+            inFlightMountServerIDs.insert(serverID)
+            defer { inFlightMountServerIDs.remove(serverID) }
+
             let probe = await NetworkReachability.probeSMBHost(server.host, port: 445, timeout: 1.5)
             hostIPCache[server.id] = probe.allIPs
             hostStates[server.id] = probe.isReachable ? .online(ipAddress: probe.primaryIP) : .offline

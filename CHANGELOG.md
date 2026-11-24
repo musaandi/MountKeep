@@ -2,6 +2,16 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.6.0] - 2026-11-23
+
+### Added
+- **Automatic macOS `NetAuthSysAgent` Deadlock Recovery:** Detects when macOS's per-user `NetAuthSysAgent` daemon becomes wedged (e.g. DCERPC `LsarGetUserName` / Mach port death deadlock where TCP `:445` is reachable while `NetFS` times out twice consecutively) and automatically restarts `NetAuthSysAgent` (`killall -9 NetAuthSysAgent`, throttled to once per 10 minutes) before retrying mounts.
+- **Manual Reset NetAuth Button:** Added a **Reset NetAuth** recovery button in **Settings → Network & System** to restart `NetAuthSysAgent` on demand.
+
+### Fixed
+- **45s Cold-Session Timeout & Per-Server Serialization:** Increased the initial cold-share mount timeout on unmounted servers to `45s` and serialized mounts per server (`inFlightMountServerIDs`), avoiding premature `NetFSMountURLCancel` calls that can trigger macOS's `NetAuthSysAgent` DCERPC leak and orphaned `/Volumes/<Share>` directories.
+- **Popover Spinner CPU / Layout Constraint Fault:** Replaced `.controlSize(.small).scaleEffect(0.65)` on `ProgressView` spinners with native `.controlSize(.mini)`, eliminating the AppKit `16.153846` min/max constraint fault and elevated CPU usage while mounting.
+
 ## [1.5.6] - 2026-11-23
 
 ### Fixed

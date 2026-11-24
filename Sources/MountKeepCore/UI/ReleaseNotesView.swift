@@ -88,8 +88,7 @@ public struct ReleaseNotesView: View {
                 HStack(spacing: 8) {
                     if manager.updateInstallProgress.isBusy {
                         ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.75)
+                            .controlSize(.mini)
                     } else if case .failed = manager.updateInstallProgress {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
