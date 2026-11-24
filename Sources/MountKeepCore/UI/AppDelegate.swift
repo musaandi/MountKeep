@@ -7,6 +7,7 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var settingsWindow: NSWindow?
+    private var releaseNotesWindow: NSWindow?
     private var eventMonitor: Any?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -30,6 +31,10 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
         observeStatusChanges()
 
         manager.start()
+
+        if let whatsNew = UpdateChecker.consumeWhatsNewNotes() {
+            openReleaseNotesWindow(mode: .whatsNew(version: whatsNew.version, notes: whatsNew.notes))
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -65,6 +70,10 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
             onOpenSettings: { [weak self] in
                 self?.closePopover()
                 self?.openSettingsWindow()
+            },
+            onOpenUpdate: { [weak self] release in
+                self?.closePopover()
+                self?.openReleaseNotesWindow(mode: .updateAvailable(release))
             },
             onQuit: { [weak self] in
                 self?.quitApp()
@@ -258,6 +267,41 @@ public final class MountKeepAppDelegate: NSObject, NSApplicationDelegate, NSPopo
         window.delegate = self
 
         self.settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    public func openReleaseNotesWindow(mode: ReleaseNotesMode) {
+        releaseNotesWindow?.close()
+
+        let view = ReleaseNotesView(
+            mode: mode,
+            onOpenGitHub: { url in
+                NSWorkspace.shared.open(url)
+            },
+            onDismiss: { [weak self] in
+                self?.releaseNotesWindow?.close()
+            }
+        )
+        let hostingController = NSHostingController(rootView: view)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        switch mode {
+        case .updateAvailable(let release):
+            window.title = "MountKeep Update — v\(release.version)"
+        case .whatsNew(let version, _):
+            window.title = "What's New in MountKeep v\(version)"
+        }
+        window.contentViewController = hostingController
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        self.releaseNotesWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

@@ -4,12 +4,20 @@ public struct AppReleaseInfo: Equatable, Sendable {
     public let version: String
     public let tagName: String
     public let releaseURL: URL
+    public let releaseNotes: String?
     public let publishedAt: String?
 
-    public init(version: String, tagName: String, releaseURL: URL, publishedAt: String? = nil) {
+    public init(
+        version: String,
+        tagName: String,
+        releaseURL: URL,
+        releaseNotes: String? = nil,
+        publishedAt: String? = nil
+    ) {
         self.version = version
         self.tagName = tagName
         self.releaseURL = releaseURL
+        self.releaseNotes = releaseNotes
         self.publishedAt = publishedAt
     }
 }
@@ -62,6 +70,7 @@ public enum UpdateChecker {
         struct GitHubReleasePayload: Decodable {
             let tag_name: String
             let html_url: String
+            let body: String?
             let published_at: String?
             let draft: Bool?
             let prerelease: Bool?
@@ -75,11 +84,13 @@ public enum UpdateChecker {
             return nil
         }
 
+        let trimmedNotes = payload.body?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedVersion = "\(parsed.major).\(parsed.minor).\(parsed.patch)"
         return AppReleaseInfo(
             version: normalizedVersion,
             tagName: payload.tag_name,
             releaseURL: url,
+            releaseNotes: (trimmedNotes?.isEmpty == false) ? trimmedNotes : nil,
             publishedAt: payload.published_at
         )
     }
@@ -130,5 +141,50 @@ public enum UpdateChecker {
         } catch {
             return .failed(error.localizedDescription)
         }
+    }
+
+    // MARK: - Bundled Changelog & "What's New"
+
+    private static let lastSeenVersionKey = "MountKeepLastSeenVersion"
+
+    public static func extractChangelogSection(forVersion version: String, from markdown: String) -> String? {
+        let targetHeader = "## [\(version)]"
+        let lines = markdown.components(separatedBy: .newlines)
+        var capturing = false
+        var captured: [String] = []
+
+        for line in lines {
+            if line.hasPrefix("## [") {
+                if capturing { break }
+                if line.hasPrefix(targetHeader) {
+                    capturing = true
+                    continue
+                }
+            } else if capturing {
+                captured.append(line)
+            }
+        }
+
+        let result = captured.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? nil : result
+    }
+
+    public static func consumeWhatsNewNotes(
+        bundle: Bundle = .main,
+        defaults: UserDefaults = .standard
+    ) -> (version: String, notes: String)? {
+        let current = currentAppVersion(bundle: bundle)
+        guard current != "0.0.0" else { return nil }
+        let lastSeen = defaults.string(forKey: lastSeenVersionKey)
+        guard lastSeen != current else { return nil }
+
+        defaults.set(current, forKey: lastSeenVersionKey)
+
+        guard let url = bundle.url(forResource: "CHANGELOG", withExtension: "md"),
+              let markdown = try? String(contentsOf: url, encoding: .utf8),
+              let notes = extractChangelogSection(forVersion: current, from: markdown) else {
+            return nil
+        }
+        return (current, notes)
     }
 }

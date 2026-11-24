@@ -368,6 +368,7 @@ final class MountKeepTests: XCTestCase {
         {
           "tag_name": "v1.3.0",
           "html_url": "https://github.com/musaandi/MountKeep/releases/tag/v1.3.0",
+          "body": "### Added\\n- Finder quick toggles",
           "published_at": "2026-11-23T20:00:00Z",
           "draft": false,
           "prerelease": false
@@ -377,7 +378,25 @@ final class MountKeepTests: XCTestCase {
         let parsed = UpdateChecker.parseLatestRelease(from: json)
         XCTAssertEqual(parsed?.version, "1.3.0")
         XCTAssertEqual(parsed?.tagName, "v1.3.0")
+        XCTAssertEqual(parsed?.releaseNotes, "### Added\n- Finder quick toggles")
         XCTAssertEqual(parsed?.releaseURL.absoluteString, "https://github.com/musaandi/MountKeep/releases/tag/v1.3.0")
+
+        let changelog = """
+        # Changelog
+
+        ## [1.3.1] - 2026-11-23
+        ### Added
+        - In-app changelog popup
+
+        ## [1.3.0] - 2026-11-23
+        ### Added
+        - Finder quick toggles
+        """
+        XCTAssertEqual(
+            UpdateChecker.extractChangelogSection(forVersion: "1.3.1", from: changelog),
+            "### Added\n- In-app changelog popup"
+        )
+        XCTAssertNil(UpdateChecker.extractChangelogSection(forVersion: "9.9.9", from: changelog))
 
         let draftJSON = """
         {

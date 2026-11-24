@@ -35,6 +35,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$PROJECT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$PROJECT_DIR/CHANGELOG.md" "$APP_BUNDLE/Contents/Resources/CHANGELOG.md"
 
 echo "==> Generating AppIcon.icns..."
 ICON_TMP="$(mktemp -d)"

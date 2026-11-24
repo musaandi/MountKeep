@@ -2,6 +2,12 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.3.1] - 2026-11-23
+
+### Added
+- **In-App Update Release Notes:** Clicking **`Update vX.Y.Z`** in the popover opens an in-app release notes window with the GitHub Release changelog and an **Open on GitHub** action.
+- **"What's New" Popup:** Automatically displays a one-time **What's New** window on first launch after updating to a new version using the bundled `CHANGELOG.md`.
+
 ## [1.3.0] - 2026-11-23
 
 ### Added

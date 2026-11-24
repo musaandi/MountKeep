@@ -40,6 +40,7 @@ private struct CapacityBarView: View {
 public struct PopoverView: View {
     @ObservedObject var manager: MountManager
     let onOpenSettings: () -> Void
+    let onOpenUpdate: ((AppReleaseInfo) -> Void)?
     let onQuit: () -> Void
 
     @State private var measuredContentHeight: CGFloat = 0
@@ -47,10 +48,12 @@ public struct PopoverView: View {
     public init(
         manager: MountManager,
         onOpenSettings: @escaping () -> Void,
+        onOpenUpdate: ((AppReleaseInfo) -> Void)? = nil,
         onQuit: @escaping () -> Void
     ) {
         self.manager = manager
         self.onOpenSettings = onOpenSettings
+        self.onOpenUpdate = onOpenUpdate
         self.onQuit = onQuit
     }
 
@@ -225,7 +228,11 @@ public struct PopoverView: View {
 
             if let update = manager.availableUpdate {
                 Button {
-                    manager.openAvailableUpdate()
+                    if let onOpenUpdate {
+                        onOpenUpdate(update)
+                    } else {
+                        manager.openAvailableUpdate()
+                    }
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "arrow.down.circle.fill")
