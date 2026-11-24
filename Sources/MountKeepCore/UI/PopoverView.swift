@@ -152,7 +152,7 @@ public struct PopoverView: View {
             Divider()
             footerView
         }
-        .frame(width: 386)
+        .frame(width: 408)
         .onAppear {
             manager.refreshFinderPreferences()
             Task { await manager.checkForUpdates(manual: false) }
@@ -321,27 +321,34 @@ public struct PopoverView: View {
 
                 Text(server.host)
                     .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
 
                 if case .online(let ip) = hostState, let ip, ip != server.host {
                     Text(ip)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 } else if case .waking = hostState {
                     Text("waking…")
                         .font(.system(size: 10))
                         .foregroundStyle(.blue)
+                        .lineLimit(1)
                 } else if case .shuttingDown = hostState {
                     Text("shutting down…")
                         .font(.system(size: 10))
                         .foregroundStyle(.orange)
+                        .lineLimit(1)
                 } else if case .awayFromHome = hostState {
                     Text("away")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 } else if case .offline = hostState {
                     Text("offline")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 if server.autoSyncAllShares {
@@ -352,15 +359,18 @@ public struct PopoverView: View {
                         .background(Color.accentColor.opacity(0.14))
                         .foregroundStyle(Color.accentColor)
                         .clipShape(Capsule())
+                        .fixedSize(horizontal: true, vertical: false)
                         .help("Automatically discovers & mounts new non-hidden shares")
                 }
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if let serverCap {
                     Text(serverCap.formattedUsedOfTotal(style: unitStyle))
                         .font(.system(size: 10, weight: .medium).monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .help("\(server.host) combined: \(serverCap.formattedUsedOfTotal(style: unitStyle)) (\(serverCap.usedPercentText), \(serverCap.formattedFree(style: unitStyle)))")
                 }
 
@@ -392,7 +402,7 @@ public struct PopoverView: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Send Wake-on-LAN packet to \(server.host) (\(mac))")
-                    } else if hostState.isOnline && server.canRemoteShutdown {
+                    } else if hostState.isOnline && server.canRemoteShutdown && manager.sshReadiness[server.id] == .ready {
                         Button {
                             confirmShutdown(server: server)
                         } label: {

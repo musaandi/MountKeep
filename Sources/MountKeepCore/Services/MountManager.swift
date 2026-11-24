@@ -30,6 +30,7 @@ public final class MountManager: ObservableObject {
 
     @Published public private(set) var config: AppConfig
     @Published public private(set) var hostStates: [UUID: HostReachabilityState] = [:]
+    @Published public private(set) var sshReadiness: [UUID: SSHReadinessState] = [:]
     @Published public private(set) var shareStates: [UUID: ShareRuntimeState] = [:]
     @Published public private(set) var shareCapacities: [UUID: VolumeCapacity] = [:]
     @Published public private(set) var isChecking: Bool = false
@@ -595,6 +596,9 @@ public final class MountManager: ObservableObject {
         if learnedAnyMAC {
             saveConfig()
         }
+
+        // Verify SSH port 22 + local key readiness for servers with Remote Shut Down enabled.
+        await refreshSSHReadiness(reachableByServer: reachableByServer)
 
         // Re-apply snapshot now that IP addresses are cached.
         applyMountedSnapshot(MountInspector.mountedSMBShares())
@@ -1465,6 +1469,80 @@ public final class MountManager: ObservableObject {
         guard let sIdx = config.servers.firstIndex(where: { $0.id == serverID }) else { return }
         config.servers[sIdx].sshShutdownEnabled = enabled
         saveConfig()
+        if enabled {
+            sshReadiness[serverID] = .checking
+            Task { await refreshSSHReadiness(forServerID: serverID) }
+        } else {
+            sshReadiness[serverID] = .disabled
+        }
+    }
+
+    public func refreshAllSSHReadiness() {
+        Task {
+            var reachable: [UUID: Bool] = [:]
+            for server in config.servers {
+                reachable[server.id] = hostStates[server.id]?.isOnline ?? false
+            }
+            await refreshSSHReadiness(reachableByServer: reachable)
+        }
+    }
+
+    private func refreshSSHReadiness(forServerID serverID: UUID) async {
+        guard let server = config.servers.first(where: { $0.id == serverID }) else { return }
+        guard server.canRemoteShutdown else {
+            sshReadiness[serverID] = .disabled
+            return
+        }
+        if !RemotePower.hasPrivateKey(at: server.effectiveSSHKeyPath) {
+            sshReadiness[serverID] = .missingLocalKey
+            return
+        }
+        if isServerAway(server) || hostStates[serverID]?.isOnline != true {
+            sshReadiness[serverID] = .hostOffline
+            return
+        }
+        let probe = await NetworkReachability.probeSMBHost(server.host, port: 22, timeout: 1.5)
+        sshReadiness[serverID] = probe.isReachable ? .ready : .portClosed
+    }
+
+    private func refreshSSHReadiness(reachableByServer: [UUID: Bool]) async {
+        var targetsToProbe: [(UUID, String)] = []
+        for server in config.servers {
+            guard server.canRemoteShutdown else {
+                sshReadiness[server.id] = .disabled
+                continue
+            }
+            if !RemotePower.hasPrivateKey(at: server.effectiveSSHKeyPath) {
+                sshReadiness[server.id] = .missingLocalKey
+                continue
+            }
+            let isOnline = reachableByServer[server.id] ?? (hostStates[server.id]?.isOnline ?? false)
+            if isServerAway(server) || !isOnline {
+                sshReadiness[server.id] = .hostOffline
+                continue
+            }
+            targetsToProbe.append((server.id, server.host))
+        }
+
+        guard !targetsToProbe.isEmpty else { return }
+
+        let results: [(UUID, Bool)] = await withTaskGroup(of: (UUID, Bool).self) { group in
+            for (serverID, host) in targetsToProbe {
+                group.addTask {
+                    let probe = await NetworkReachability.probeSMBHost(host, port: 22, timeout: 1.5)
+                    return (serverID, probe.isReachable)
+                }
+            }
+            var collected: [(UUID, Bool)] = []
+            for await item in group {
+                collected.append(item)
+            }
+            return collected
+        }
+
+        for (serverID, portOpen) in results {
+            sshReadiness[serverID] = portOpen ? .ready : .portClosed
+        }
     }
 
     public func updateServer(

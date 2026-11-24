@@ -2,6 +2,13 @@
 
 All notable changes to MountKeep are documented in this file.
 
+## [1.5.2] - 2026-11-23
+
+### Fixed
+- **Live SSH Readiness Verification:** MountKeep now verifies both the local SSH key and remote TCP port `22` reachability before enabling the **`Off`** button in the menu bar popover. PCs without OpenSSH Server running on port `22` no longer show a broken **`Off`** button.
+- **Clearer Remote Power Badges:** Replaced the counterintuitive red **`SSH Off`** badge in Settings with live status pills (**`Remote Power`** in green when ready, **`SSH Port 22 Closed`** or **`Missing SSH Key`** in orange when setup is incomplete) plus a **`Re-check`** button.
+- **Popover IP Wrapping:** Widened the menu bar popover slightly (`408pt`) and prevented server IP addresses from wrapping onto two lines.
+
 ## [1.5.1] - 2026-11-23
 
 ### Fixed

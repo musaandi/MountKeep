@@ -262,6 +262,19 @@ public enum HostReachabilityState: Equatable, Sendable {
     }
 }
 
+public enum SSHReadinessState: Equatable, Sendable {
+    case disabled
+    case checking
+    case ready
+    case missingLocalKey
+    case portClosed
+    case hostOffline
+
+    public var isReady: Bool {
+        self == .ready
+    }
+}
+
 public enum ShareRuntimeState: Equatable, Sendable {
     case unknown
     case mounted(mountPoint: String)

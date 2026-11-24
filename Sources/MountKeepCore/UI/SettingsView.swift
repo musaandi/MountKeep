@@ -80,6 +80,7 @@ public struct SettingsView: View {
         .frame(minWidth: 620, minHeight: 560)
         .sheet(isPresented: $showPowerSetupSheet, onDismiss: {
             hasDefaultShutdownKey = RemotePower.hasPrivateKey()
+            manager.refreshAllSSHReadiness()
         }) {
             RemotePowerSetupView(
                 serverHost: powerSetupHost,
@@ -199,14 +200,7 @@ public struct SettingsView: View {
                                     .clipShape(Capsule())
                             }
                             if server.canRemoteShutdown {
-                                Text("SSH Off")
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Color.red.opacity(0.12))
-                                    .foregroundStyle(.red)
-                                    .clipShape(Capsule())
-                                    .help("Remote Shut Down enabled via SSH (\(server.effectiveSSHUsername)@\(server.host))")
+                                sshReadinessBadge(for: server)
                             }
                         }
 
@@ -683,6 +677,12 @@ public struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Re-check") {
+                    hasDefaultShutdownKey = RemotePower.hasPrivateKey()
+                    manager.refreshAllSSHReadiness()
+                }
+                .controlSize(.small)
+
                 Button {
                     powerSetupHost = manager.config.servers.first?.host ?? ""
                     powerSetupUser = manager.config.servers.first?.effectiveSSHUsername ?? ""
@@ -738,6 +738,10 @@ public struct SettingsView: View {
 
                             Spacer()
 
+                            if server.sshShutdownEnabled {
+                                sshReadinessBadge(for: server)
+                            }
+
                             Button("Guide…") {
                                 powerSetupHost = server.host
                                 powerSetupUser = server.effectiveSSHUsername
@@ -766,6 +770,76 @@ public struct SettingsView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private func sshReadinessBadge(for server: ServerConfig) -> some View {
+        let state = manager.sshReadiness[server.id] ?? .checking
+        switch state {
+        case .ready:
+            HStack(spacing: 3) {
+                Image(systemName: "power")
+                    .font(.system(size: 8.5, weight: .semibold))
+                Text("Remote Power")
+                    .font(.system(size: 9.5, weight: .medium))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(Color.green.opacity(0.14))
+            .foregroundStyle(.green)
+            .clipShape(Capsule())
+            .help("SSH port 22 reachable on \(server.host) and local key ready (\(server.effectiveSSHUsername)@\(server.host))")
+
+        case .portClosed:
+            HStack(spacing: 3) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 8.5))
+                Text("SSH Port 22 Closed")
+                    .font(.system(size: 9.5, weight: .medium))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(Color.orange.opacity(0.16))
+            .foregroundStyle(.orange)
+            .clipShape(Capsule())
+            .help("OpenSSH Server is not reachable on \(server.host):22. Run the Setup Guide PowerShell script on \(server.host), then click Re-check.")
+
+        case .missingLocalKey:
+            HStack(spacing: 3) {
+                Image(systemName: "key")
+                    .font(.system(size: 8.5))
+                Text("Missing SSH Key")
+                    .font(.system(size: 9.5, weight: .medium))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(Color.orange.opacity(0.16))
+            .foregroundStyle(.orange)
+            .clipShape(Capsule())
+            .help("SSH key not found at \(server.effectiveSSHKeyPath). Open Setup Guide to generate it.")
+
+        case .checking:
+            Text("Checking SSH…")
+                .font(.system(size: 9.5, weight: .medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background(Color.secondary.opacity(0.12))
+                .foregroundStyle(.secondary)
+                .clipShape(Capsule())
+
+        case .hostOffline:
+            Text("Remote Power")
+                .font(.system(size: 9.5, weight: .medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background(Color.secondary.opacity(0.12))
+                .foregroundStyle(.secondary)
+                .clipShape(Capsule())
+                .help("Remote Shut Down enabled; will verify SSH port 22 once \(server.host) is online.")
+
+        case .disabled:
+            EmptyView()
+        }
     }
 
     private var reliabilitySection: some View {
